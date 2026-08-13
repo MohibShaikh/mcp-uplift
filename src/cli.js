@@ -54,8 +54,16 @@ async function shutdown(code = 0) {
 }
 
 function drain() {
-  if (inputEnded && inFlight === 0) void shutdown();
+  if (inputEnded && inFlight === 0) void startup.then((ok) => shutdown(ok ? 0 : 2));
 }
+
+// Start eagerly so a bad command or failed handshake is reported now, rather
+// than exiting silently when no request ever arrives. Shutdown waits on this
+// so a closed stdin cannot exit 0 before the failure is known.
+const startup = bridge.start().then(() => true, (err) => {
+  process.stderr.write(`mcp-uplift: could not start ${options.command[0]}: ${err.message}\n`);
+  return false;
+});
 
 function dispatch(line) {
   if (Buffer.byteLength(line) > options.maxLineBytes) {
@@ -124,6 +132,10 @@ function parseArgs(argv) {
       if (!Number.isSafeInteger(number) || number < 1) throw new Error(`${arg} requires a positive integer`);
       values[key] = number;
       continue;
+    }
+    // An unknown flag is a typo, not a command; running it would be surprising.
+    if (arg.startsWith('-') && arg !== '-') {
+      throw new Error(`unknown option ${arg}\nRun 'mcp-uplift --help' to see available options.`);
     }
     break;
   }

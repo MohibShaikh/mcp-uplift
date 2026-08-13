@@ -353,4 +353,26 @@ describe('mcp-uplift bridge', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('CLI rejects an unknown option instead of running it as the command', async () => {
+    const res = await runCli(['--nonsense', '--', process.execPath, FIXTURE], '');
+    assert.equal(res.code, 2);
+    assert.match(res.stderr, /unknown option --nonsense/);
+    assert.match(res.stderr, /--help/);
+  });
+
+  test('CLI reports a command that cannot start, even with no input', async () => {
+    // Closed stdin used to race startup and exit 0, hiding the real failure.
+    const res = await runCli(['this-binary-does-not-exist'], '');
+    assert.equal(res.code, 2);
+    assert.match(res.stderr, /could not start this-binary-does-not-exist/);
+  });
+
+  test('CLI exits 0 on a successful run', async () => {
+    const request = JSON.stringify(modern('tools/list')) + '\n';
+    const res = await runCli([process.execPath, FIXTURE], request);
+    assert.equal(res.code, 0);
+    assert.equal(res.stderr, '');
+    assert.equal(JSON.parse(res.stdout.trim()).result.resultType, 'complete');
+  });
 });
