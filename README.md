@@ -5,6 +5,10 @@ logging configuration, resource subscriptions, and server-initiated requests.
 Older MCP servers still use those protocol features. `mcp-uplift` wraps one
 legacy stdio server and presents it as a modern stateless server.
 
+> **Security:** wrapping a server executes that server with your operating-system
+> permissions. This bridge is not a sandbox. Only run packages and commands you
+> trust.
+
 ## Usage
 
 Run without installing:
@@ -18,6 +22,17 @@ For example:
 ```sh
 npx mcp-uplift npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
+
+The wrapped command receives a minimal environment by default. Forward a needed
+credential explicitly, before `--`:
+
+```sh
+npx mcp-uplift --env BRAVE_API_KEY -- npx -y @modelcontextprotocol/server-brave-search
+```
+
+`--inherit-env` is available for compatibility but exposes every environment
+variable to the wrapped process. Run `npx mcp-uplift --help` for resource and
+timeout controls.
 
 ## Client configuration
 
@@ -61,25 +76,32 @@ After, launch the same command through `mcp-uplift`:
 
 ## Known limitations
 
-- **Calls that can trigger a server-initiated request are serialized.** The
+Real-world validation confirmed discovery and tool listing against 39 distinct
+legacy MCP packages spanning `2024-11-05`, `2025-06-18`, and `2025-11-25`.
+The official filesystem server also completed a real `roots/list` MRTR round
+trip and returned all 14 tools. These are tested examples, not a guarantee that
+every server or session-dependent behavior can be translated.
+
+- **All legacy calls are serialized.** The
   legacy protocol never links a `sampling/createMessage`, `elicitation/create`,
   or `roots/list` request back to the call that caused it, so the bridge
-  cannot attribute a question to the right call if two run concurrently.
-  Ordinary calls that never ask a question are unaffected.
+  keeps one call in flight through all of its MRTR rounds. This favors correct
+  attribution over throughput.
 - **Legacy notifications have no home and are dropped.** `2026-07-28` moved
   streamed notifications onto a dedicated `subscriptions/listen` stream; this
   bridge is a plain one-request-one-response stdio proxy and does not
   implement that stream, so `notifications/progress` and
   `notifications/message` from the wrapped server are discarded rather than
   delivered.
-- **Verified against a real upstream server**, not just the test fixture: the
-  official `@modelcontextprotocol/server-filesystem` (`0.2.0`) was wrapped
-  unmodified via
-  `node src/cli.js npx -y @modelcontextprotocol/server-filesystem <dir>`.
-  `server/discover` returned its real identity, `tools/list` triggered a
-  genuine server-initiated `roots/list` request that the bridge correctly
-  turned into an `input_required` result, and after that round trip it
-  returned all 14 of its real tools. A real `read_text_file` call returned
-  the actual contents of a file on disk. Requires network access (`npx`
-  fetches the package), so it is not part of the offline test suite.
+- Real-server checks require downloads and remain outside the offline suite.
+  See [COMPATIBILITY.md](COMPATIBILITY.md) for the 60-package campaign and its
+  exact limitations.
+- The kill switch terminates the launched process tree on POSIX and Windows,
+  but trusted code can deliberately daemonize into a new OS process session.
+  Use an OS sandbox or container when stronger confinement is required.
 
+## Security reports
+
+Do not include credentials or exploit details in a public issue. Report a
+suspected vulnerability privately through the repository's GitHub security
+advisory page. Ordinary bugs can use the public issue tracker.

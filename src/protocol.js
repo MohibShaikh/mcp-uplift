@@ -4,7 +4,7 @@
  */
 
 export const MODERN_VERSION = '2026-07-28';
-export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05', '2024-10-07'];
 
 /** Reserved _meta keys introduced by SEP-2575 / SEP-2322. */
 export const META = {
@@ -60,3 +60,12 @@ export const SERVER_INITIATED = new Set([
 ]);
 
 export const DEFAULT_TTL_MS = 60_000;
+
+export const LIMITS = {
+  maxLineBytes: 4 * 1024 * 1024,
+  maxBufferBytes: 8 * 1024 * 1024,
+  maxInFlight: 32,
+  initializeTimeoutMs: 60_000,
+  requestTimeoutMs: 120_000,
+  shutdownGraceMs: 3_000,
+};

@@ -4,6 +4,7 @@ import {
   MODERN_VERSION, META, ERROR, REMOVED_METHODS, CACHEABLE_METHODS,
   DEFAULT_TTL_MS,
 } from './protocol.js';
+import { isDeepStrictEqual } from 'node:util';
 
 const BRIDGE_INFO = { name: 'mcp-uplift', version: '0.1.0' };
 
@@ -20,8 +21,8 @@ const BRIDGE_INFO = { name: 'mcp-uplift', version: '0.1.0' };
 export class UpliftBridge {
   #lock = Promise.resolve();
 
-  constructor({ command, args, env, cwd, onStderr, ttlMs = DEFAULT_TTL_MS } = {}) {
-    this.legacy = new LegacyClient({ command, args, env, cwd, onStderr });
+  constructor({ command, args, env, cwd, onStderr, ttlMs = DEFAULT_TTL_MS, ...limits } = {}) {
+    this.legacy = new LegacyClient({ command, args, env, cwd, onStderr, ...limits });
     this.mrtr = new MrtrStore({ ttlMs });
     this.ttlMs = ttlMs;
     /** legacy server-initiated requests seen while a call is in flight */
@@ -44,6 +45,20 @@ export class UpliftBridge {
     const id = req.id;
     try {
       const version = req.params?._meta?.[META.protocolVersion];
+      const capabilities = req.params?._meta?.[META.clientCapabilities];
+      const clientInfo = req.params?._meta?.[META.clientInfo];
+
+      if (req?.jsonrpc !== '2.0' || (typeof req.id !== 'string' && !Number.isInteger(req.id)) ||
+          typeof req.method !== 'string' || !req.params || typeof req.params !== 'object') {
+        return this.#error(id ?? null, -32600, 'Invalid Request');
+      }
+      if (!version || !capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
+        return this.#error(id, ERROR.INVALID_PARAMS, 'Missing required request metadata');
+      }
+      if (clientInfo !== undefined && (!clientInfo || typeof clientInfo.name !== 'string' ||
+          typeof clientInfo.version !== 'string')) {
+        return this.#error(id, ERROR.INVALID_PARAMS, 'Invalid clientInfo metadata');
+      }
 
       // Version negotiation is per-request now; there is no handshake to reject.
       if (version && version !== MODERN_VERSION) {
@@ -53,7 +68,7 @@ export class UpliftBridge {
         });
       }
 
-      if (req.method === 'server/discover') return this.#ok(id, await this.#discover());
+      if (req.method === 'server/discover') return this.#ok(id, this.#decorate(req.method, await this.#discover()));
 
       if (REMOVED_METHODS.has(req.method)) {
         return this.#error(id, ERROR.METHOD_NOT_FOUND,
@@ -90,12 +105,10 @@ export class UpliftBridge {
 
     return {
       resultType: 'complete',
-      protocolVersions: [MODERN_VERSION],
+      supportedVersions: [MODERN_VERSION],
       capabilities,
-      serverInfo: {
-        ...this.serverInfo,
-        _upliftedFrom: this.legacy.negotiatedVersion,
-      },
+      ttlMs: 0,
+      cacheScope: 'private',
       instructions: init.instructions,
     };
   }
@@ -103,44 +116,50 @@ export class UpliftBridge {
   async #forward(id, req) {
     await this.legacy.start();
 
-    // A server-initiated request carries no link back to the call that caused
-    // it, so the legs that can produce one are serialized: only one leg is ever
-    // in flight, which makes attribution unambiguous. A parked call is blocked
-    // awaiting our answer and cannot ask anything meanwhile, so the lock is
-    // released while parked rather than held across the round trip.
+    // A server-initiated request carries no link back to its originating call,
+    // so one legacy call owns the upstream request channel through every MRTR round.
     const release = await this.#acquire();
     this.pendingServerRequests = [];
 
     const params = stripModernMeta(req.params);
     const call = this.legacy.request(req.method, params);
-    return await this.#settle(id, req.method, call, release);
+    const capabilities = req.params._meta[META.clientCapabilities];
+    return await this.#settle(id, req.method, call, release, params, capabilities);
   }
 
   /** Second leg of MRTR: feed the client's answers back into the legacy call. */
   async #resume(id, req) {
-    const entry = this.mrtr.take(req.params.requestState);
+    const entry = this.mrtr.get(req.params.requestState);
     if (!entry) {
       return this.#error(id, ERROR.INVALID_PARAMS, 'Unknown or expired requestState');
     }
 
-    // Answering revives the parked call, so this leg takes its own turn.
-    const release = await this.#acquire();
-    this.pendingServerRequests = [];
-    for (const response of req.params.inputResponses ?? []) {
-      const legacyId = entry.legacyIds.get(response.id);
-      if (legacyId === undefined) continue;
-      if (response.error) this.legacy.rejectServer(legacyId, response.error.message ?? 'declined');
-      else this.legacy.respondToServer(legacyId, response.result);
+    const responses = req.params.inputResponses;
+    const keys = responses && typeof responses === 'object' && !Array.isArray(responses)
+      ? Object.keys(responses) : [];
+    const expected = [...entry.legacyIds.keys()];
+    const resumedParams = stripModernMeta(req.params);
+    if (req.method !== entry.method || !isDeepStrictEqual(resumedParams, entry.params) ||
+        keys.length !== expected.length || keys.some((key) => !entry.legacyIds.has(key) ||
+          !validInputResponse(entry.inputRequests[key].method, responses[key]))) {
+      return this.#error(id, ERROR.INVALID_PARAMS, 'Invalid inputResponses or resumed request');
+    }
+    this.mrtr.take(req.params.requestState);
+
+    const release = entry.release;
+    for (const [key, response] of Object.entries(responses)) {
+      this.legacy.respondToServer(entry.legacyIds.get(key), response);
     }
 
-    return await this.#settle(id, req.method, entry.settle, release);
+    const capabilities = req.params._meta[META.clientCapabilities];
+    return await this.#settle(id, req.method, entry.settle, release, entry.params, capabilities);
   }
 
   /**
    * Races an in-flight legacy call against the questions it may ask, parking it
    * when the server wants input and releasing the lock only once it is done.
    */
-  async #settle(id, method, call, release) {
+  async #settle(id, method, call, release, params, capabilities) {
     const waiter = this.#waitForServerRequest();
     let outcome;
     try {
@@ -156,10 +175,25 @@ export class UpliftBridge {
     }
 
     if (outcome.kind === 'input') {
-      const inputRequests = outcome.msgs.map(toInputRequest);
+      const required = requiredCapabilities(outcome.msgs, capabilities);
+      if (required) {
+        for (const msg of outcome.msgs) this.legacy.rejectServer(msg.id, 'client capability not declared');
+        release();
+        throw Object.assign(new Error('Missing required client capability'), { rpc: {
+          code: ERROR.MISSING_REQUIRED_CLIENT_CAPABILITY,
+          message: 'Missing required client capability',
+          data: { requiredCapabilities: required },
+        } });
+      }
+      const inputRequests = Object.fromEntries(outcome.msgs.map((m) => [`ir_${m.id}`, toInputRequest(m)]));
       const legacyIds = new Map(outcome.msgs.map((m) => [`ir_${m.id}`, m.id]));
-      const token = this.mrtr.park({ inputRequests, legacyIds, settle: call });
-      release();
+      const token = this.mrtr.park({ inputRequests, legacyIds, settle: call,
+        method, params, release,
+        cancel: (reason) => {
+          for (const legacyId of legacyIds.values()) this.legacy.rejectServer(legacyId, reason);
+          release();
+        },
+      });
       return this.#ok(id, inputRequiredResult({ inputRequests, requestState: token }));
     }
 
@@ -210,10 +244,10 @@ export class UpliftBridge {
 
   /** Adds fields that 2026-07-28 requires on every result. */
   #decorate(method, result) {
-    const out = { resultType: 'complete', ...result };
+    const out = { ...(result ?? {}), resultType: 'complete' };
     if (CACHEABLE_METHODS.has(method)) {
-      out.ttlMs ??= this.ttlMs;
-      out.cacheScope ??= 'private';
+      if (!Number.isInteger(out.ttlMs) || out.ttlMs < 0) out.ttlMs = this.ttlMs;
+      if (out.cacheScope !== 'public' && out.cacheScope !== 'private') out.cacheScope = 'private';
     }
     if (method === 'tools/list' && Array.isArray(out.tools)) {
       // Deterministic order improves prompt cache hits (SEP-2549 guidance).
@@ -228,11 +262,12 @@ export class UpliftBridge {
   }
 
   #error(id, code, message, data) {
-    return { jsonrpc: '2.0', id, error: data ? { code, message, data } : { code, message } };
+    return { jsonrpc: '2.0', id, error: data !== undefined ? { code, message, data } : { code, message } };
   }
 
   stop() {
-    this.legacy.stop();
+    this.mrtr.clear();
+    return this.legacy.stop();
   }
 }
 
@@ -248,8 +283,8 @@ function once(fn) {
 
 /** Legacy servers reject unknown _meta keys in some SDKs, so strip ours. */
 function stripModernMeta(params) {
-  if (!params?._meta) return params;
-  const meta = { ...params._meta };
+  if (!params) return params;
+  const meta = { ...(params._meta ?? {}) };
   for (const key of Object.values(META)) delete meta[key];
   const out = { ...params };
   if (Object.keys(meta).length) out._meta = meta;
@@ -257,4 +292,40 @@ function stripModernMeta(params) {
   delete out.requestState;
   delete out.inputResponses;
   return out;
+}
+
+function requiredCapabilities(messages, capabilities) {
+  const required = {};
+  for (const { method, params = {} } of messages) {
+    if (method === 'roots/list' && !capabilities.roots) required.roots = {};
+    if (method === 'sampling/createMessage') {
+      if (!capabilities.sampling) required.sampling = {};
+      else {
+        if ((params.tools || params.toolChoice) && !capabilities.sampling.tools)
+          (required.sampling ??= {}).tools = {};
+        if (params.includeContext && params.includeContext !== 'none' && !capabilities.sampling.context)
+          (required.sampling ??= {}).context = {};
+      }
+    }
+    if (method === 'elicitation/create') {
+      const mode = params.mode === 'url' ? 'url' : 'form';
+      if (!capabilities.elicitation?.[mode]) (required.elicitation ??= {})[mode] = {};
+    }
+  }
+  return Object.keys(required).length ? required : null;
+}
+
+function validInputResponse(method, response) {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return false;
+  if (method === 'roots/list') return Array.isArray(response.roots);
+  if (method === 'sampling/createMessage') {
+    return typeof response.model === 'string' && (response.role === 'user' || response.role === 'assistant') &&
+      response.content !== undefined;
+  }
+  if (method === 'elicitation/create') {
+    if (!['accept', 'decline', 'cancel'].includes(response.action)) return false;
+    return response.action !== 'accept' || response.content === undefined ||
+      (response.content !== null && typeof response.content === 'object' && !Array.isArray(response.content));
+  }
+  return false;
 }

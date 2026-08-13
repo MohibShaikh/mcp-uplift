@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { LEGACY_VERSIONS, SERVER_INITIATED } from './protocol.js';
+import { LEGACY_VERSIONS, SERVER_INITIATED, LIMITS } from './protocol.js';
 
 /**
  * Talks to a legacy (handshake-based) MCP server over stdio, and hides the
@@ -17,14 +17,23 @@ export class LegacyClient extends EventEmitter {
   #nextId = 1;
   #pending = new Map();
   #ready = null;
+  #stopping = null;
 
-  constructor({ command, args = [], env = process.env, cwd, onStderr } = {}) {
+  constructor({ command, args = [], env = process.env, cwd, onStderr,
+    maxLineBytes = LIMITS.maxLineBytes, maxBufferBytes = LIMITS.maxBufferBytes,
+    initializeTimeoutMs = LIMITS.initializeTimeoutMs,
+    requestTimeoutMs = LIMITS.requestTimeoutMs, shutdownGraceMs = LIMITS.shutdownGraceMs } = {}) {
     super();
     this.command = command;
     this.args = args;
     this.env = env;
     this.cwd = cwd;
     this.onStderr = onStderr;
+    this.maxLineBytes = maxLineBytes;
+    this.maxBufferBytes = maxBufferBytes;
+    this.initializeTimeoutMs = initializeTimeoutMs;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.shutdownGraceMs = shutdownGraceMs;
     this.initializeResult = null;
     this.negotiatedVersion = null;
   }
@@ -41,28 +50,45 @@ export class LegacyClient extends EventEmitter {
       env: this.env,
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
 
     this.#proc.stdout.setEncoding('utf8');
     this.#proc.stdout.on('data', (chunk) => this.#onData(chunk));
     this.#proc.stderr.setEncoding('utf8');
     this.#proc.stderr.on('data', (d) => this.onStderr?.(d));
+    this.#proc.on('error', (err) => this.#fail(err));
+    this.#proc.stdin.on('error', (err) => this.#fail(err));
 
+    const proc = this.#proc;
     this.#proc.on('exit', (code) => {
       const err = new Error(`legacy MCP server exited (code ${code})`);
       for (const { reject } of this.#pending.values()) reject(err);
       this.#pending.clear();
-      this.#proc = null;
-      this.#ready = null;
+      if (this.#proc === proc) {
+        this.#proc = null;
+        this.#ready = null;
+      }
+      if (groupAlive(proc)) {
+        killTree(proc, 'SIGTERM');
+        const timer = setTimeout(() => killTree(proc, 'SIGKILL'), this.shutdownGraceMs);
+        timer.unref?.();
+      }
     });
 
     // The bridge advertises the client capabilities a legacy server may want.
     // Sampling/elicitation/roots are surfaced to the modern client via MRTR.
-    const result = await this.request('initialize', {
-      protocolVersion: LEGACY_VERSIONS[0],
-      capabilities: { sampling: {}, elicitation: {}, roots: { listChanged: false } },
-      clientInfo: { name: 'mcp-uplift', version: '0.1.0' },
-    });
+    let result;
+    try {
+      result = await this.request('initialize', {
+        protocolVersion: LEGACY_VERSIONS[0],
+        capabilities: { sampling: {}, elicitation: {}, roots: { listChanged: false } },
+        clientInfo: { name: 'mcp-uplift', version: '0.1.0' },
+      }, { timeoutMs: this.initializeTimeoutMs });
+    } catch (err) {
+      await this.stop();
+      throw err;
+    }
 
     this.initializeResult = result;
     this.negotiatedVersion = result?.protocolVersion ?? LEGACY_VERSIONS[0];
@@ -77,6 +103,11 @@ export class LegacyClient extends EventEmitter {
       const line = this.#buf.slice(0, idx).trim();
       this.#buf = this.#buf.slice(idx + 1);
       if (!line) continue;
+      if (Buffer.byteLength(line) > this.maxLineBytes) {
+        this.#fail(new Error('legacy MCP output line limit exceeded'));
+        this.stop();
+        return;
+      }
       let msg;
       try {
         msg = JSON.parse(line);
@@ -84,6 +115,10 @@ export class LegacyClient extends EventEmitter {
         continue; // Not JSON-RPC; legacy servers sometimes print banners on stdout.
       }
       this.#dispatch(msg);
+    }
+    if (Buffer.byteLength(this.#buf) > this.maxBufferBytes) {
+      this.#fail(new Error('legacy MCP output buffer limit exceeded'));
+      void this.stop();
     }
   }
 
@@ -118,6 +153,7 @@ export class LegacyClient extends EventEmitter {
 
   /** Rejects a server-initiated request (client declined, or cannot satisfy it). */
   rejectServer(id, message) {
+    if (!this.#proc) return;
     this.#respond(id, { code: -32603, message });
   }
 
@@ -126,7 +162,12 @@ export class LegacyClient extends EventEmitter {
     this.#proc.stdin.write(JSON.stringify(msg) + '\n');
   }
 
-  request(method, params, { timeoutMs = 120_000 } = {}) {
+  #fail(err) {
+    for (const { reject } of this.#pending.values()) reject(err);
+    this.#pending.clear();
+  }
+
+  request(method, params, { timeoutMs = this.requestTimeoutMs } = {}) {
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -139,7 +180,13 @@ export class LegacyClient extends EventEmitter {
         resolve: (v) => { clearTimeout(timer); resolve(v); },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
-      this.#write({ jsonrpc: '2.0', id, method, params });
+      try {
+        this.#write({ jsonrpc: '2.0', id, method, params });
+      } catch (err) {
+        this.#pending.delete(id);
+        clearTimeout(timer);
+        reject(err);
+      }
     });
   }
 
@@ -148,8 +195,57 @@ export class LegacyClient extends EventEmitter {
   }
 
   stop() {
-    this.#proc?.kill();
+    if (this.#stopping) return this.#stopping;
+    const proc = this.#proc;
+    if (!proc) return Promise.resolve();
     this.#proc = null;
     this.#ready = null;
+    this.#fail(new Error('legacy MCP server stopped'));
+    this.#stopping = new Promise((resolve) => {
+      let done = false;
+      let timer;
+      const finish = () => {
+        if (done) return;
+        if (groupAlive(proc)) return;
+        done = true;
+        clearTimeout(timer);
+        this.#stopping = null;
+        resolve();
+      };
+      proc.once('exit', finish);
+      timer = setTimeout(() => {
+        killTree(proc, 'SIGKILL');
+        done = true;
+        this.#stopping = null;
+        resolve();
+      }, this.shutdownGraceMs);
+      killTree(proc, 'SIGTERM');
+    });
+    return this.#stopping;
+  }
+}
+
+function killTree(proc, signal) {
+  if (!Number.isInteger(proc.pid)) return;
+  try {
+    if (process.platform === 'win32') {
+      const args = ['/pid', String(proc.pid), '/t'];
+      if (signal === 'SIGKILL') args.push('/f');
+      spawn('taskkill', args, { stdio: 'ignore', windowsHide: true }).unref();
+    } else process.kill(-proc.pid, signal);
+  } catch (err) {
+    if (err.code !== 'ESRCH') throw err;
+  }
+}
+
+function groupAlive(proc) {
+  if (!Number.isInteger(proc.pid)) return false;
+  if (process.platform === 'win32') return proc.exitCode === null;
+  try {
+    process.kill(-proc.pid, 0);
+    return true;
+  } catch (err) {
+    if (err.code === 'ESRCH') return false;
+    throw err;
   }
 }

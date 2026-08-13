@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 /**
  * A deliberately old-fashioned MCP server (2025-11-25 semantics) used as a
  * test fixture: it requires the initialize handshake, and one of its tools
@@ -9,6 +11,12 @@ let buf = '';
 let nextServerId = 1000;
 const write = (m) => process.stdout.write(JSON.stringify(m) + '\n');
 const pendingElicit = new Map();
+
+if (process.env.SPAWN_DESCENDANT_FILE) {
+  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+    { stdio: 'ignore' });
+  writeFileSync(process.env.SPAWN_DESCENDANT_FILE, String(child.pid));
+}
 
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -27,7 +35,18 @@ function handle(msg) {
     const waiting = pendingElicit.get(msg.id);
     if (waiting) {
       pendingElicit.delete(msg.id);
-      if (msg.error) {
+      if (waiting.stage === 'first') {
+        const sid = nextServerId++;
+        pendingElicit.set(sid, { reqId: waiting.reqId, stage: 'second' });
+        setTimeout(() => write({ jsonrpc: '2.0', id: sid, method: 'roots/list', params: {} }), 20);
+        return;
+      }
+      if (waiting.stage === 'second') {
+        write({ jsonrpc: '2.0', id: waiting.reqId,
+          result: { content: [{ type: 'text', text: 'two rounds complete' }] } });
+        return;
+      }
+      if (msg.error || msg.result.action !== 'accept') {
         write({ jsonrpc: '2.0', id: waiting.reqId, error: { code: -32603, message: 'declined' } });
       } else {
         write({
@@ -71,6 +90,12 @@ function handle(msg) {
     return;
   }
 
+  if (method === 'resources/read' && params.uri === 'poison-result') {
+    write({ jsonrpc: '2.0', id, result: { resultType: 'input_required', ttlMs: -1,
+      cacheScope: 'everyone', contents: [] } });
+    return;
+  }
+
   if (method === 'tools/call') {
     if (params.name === 'echo') {
       write({
@@ -93,6 +118,21 @@ function handle(msg) {
       write({ jsonrpc: '2.0', id, error: { code: -32000, message: 'custom failure', data: { retryable: false } } });
       return;
     }
+    if (params.name === 'falsey-error') {
+      write({ jsonrpc: '2.0', id, error: { code: -32000, message: 'falsey data', data: false } });
+      return;
+    }
+    if (params.name === 'poison-result') {
+      write({ jsonrpc: '2.0', id, result: { resultType: 'input_required', ttlMs: -1,
+        cacheScope: 'everyone', content: [{ type: 'text', text: 'safe' }] } });
+      return;
+    }
+    if (params.name === 'env') {
+      write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text',
+        text: `${process.env.TEST_SECRET ?? 'absent'}|${process.env.TEST_ALLOWED ?? 'absent'}` }] } });
+      return;
+    }
+    if (params.name === 'hang') return;
     if (params.name === 'crash') {
       process.exit(7);
     }
@@ -111,6 +151,13 @@ function handle(msg) {
           },
         },
       });
+      return;
+    }
+    if (params.name === 'two-round') {
+      const sid = nextServerId++;
+      pendingElicit.set(sid, { reqId: id, stage: 'first' });
+      write({ jsonrpc: '2.0', id: sid, method: 'elicitation/create',
+        params: { mode: 'form', message: 'First?', requestedSchema: { type: 'object', properties: {} } } });
       return;
     }
     write({ jsonrpc: '2.0', id, error: { code: -32602, message: 'unknown tool' } });

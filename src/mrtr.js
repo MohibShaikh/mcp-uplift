@@ -25,29 +25,57 @@ export class MrtrStore {
    * @param {Map}   p.legacyIds       inputRequest id -> legacy JSON-RPC id
    * @param {Promise} p.settle        the original in-flight legacy request
    */
-  park({ inputRequests, legacyIds, settle }) {
+  park({ inputRequests, legacyIds, settle, cancel, method, params, release }) {
     this.sweep();
     const token = randomUUID();
-    this.#parked.set(token, {
+    const entry = {
       inputRequests,
       legacyIds,
       settle,
+      cancel,
+      method,
+      params,
+      release,
       expiresAt: Date.now() + this.ttlMs,
-    });
+    };
+    entry.timer = setTimeout(() => this.#expire(token, entry), this.ttlMs);
+    entry.timer.unref?.();
+    this.#parked.set(token, entry);
     return token;
   }
 
-  take(token) {
+  get(token) {
     const entry = this.#parked.get(token);
     if (!entry) return null;
+    if (entry.expiresAt < Date.now()) {
+      this.#expire(token, entry);
+      return null;
+    }
+    return entry;
+  }
+
+  take(token) {
+    const entry = this.get(token);
+    if (!entry) return null;
     this.#parked.delete(token);
-    if (entry.expiresAt < Date.now()) return null;
+    clearTimeout(entry.timer);
     return entry;
   }
 
   sweep() {
     const now = Date.now();
-    for (const [k, v] of this.#parked) if (v.expiresAt < now) this.#parked.delete(k);
+    for (const [k, v] of this.#parked) if (v.expiresAt < now) this.#expire(k, v);
+  }
+
+  clear(reason = 'bridge stopped') {
+    for (const [k, v] of this.#parked) this.#expire(k, v, reason);
+  }
+
+  #expire(token, entry, reason = 'requestState expired') {
+    if (this.#parked.get(token) !== entry) return;
+    this.#parked.delete(token);
+    clearTimeout(entry.timer);
+    entry.cancel?.(reason);
   }
 
   get size() {
@@ -62,7 +90,6 @@ export class MrtrStore {
  */
 export function toInputRequest(legacyMsg) {
   return {
-    id: `ir_${legacyMsg.id}`,
     method: legacyMsg.method,
     params: legacyMsg.params ?? {},
   };

@@ -1,19 +1,48 @@
 {
   "name": "mcp-uplift",
   "version": "0.1.0",
-  "description": "Run any legacy MCP server (2025-11-25 and earlier) as a modern 2026-07-28 stateless server. Handshake, sessions, and server-initiated requests are translated for you.",
+  "description": "Experimental bridge for running trusted legacy MCP stdio servers behind the 2026-07-28 protocol.",
   "type": "module",
   "bin": {
-    "mcp-uplift": "./src/cli.js"
+    "mcp-uplift": "src/cli.js"
   },
   "main": "./src/bridge.js",
   "exports": {
     ".": "./src/bridge.js"
   },
-  "files": ["src", "README.md"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "DECISIONS.md",
+    "COMPATIBILITY.md"
+  ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "prepublishOnly": "npm test"
   },
-  "keywords": ["mcp", "model-context-protocol", "proxy", "bridge", "compatibility", "2026-07-28"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "proxy",
+    "bridge",
+    "compatibility",
+    "2026-07-28"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "MohibShaikh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MohibShaikh/ZehphyrFleet.git"
+  },
+  "homepage": "https://github.com/MohibShaikh/ZehphyrFleet#readme",
+  "bugs": {
+    "url": "https://github.com/MohibShaikh/ZehphyrFleet/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

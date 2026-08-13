@@ -2,6 +2,9 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { UpliftBridge } from '../src/bridge.js';
 import { MODERN_VERSION, META, ERROR } from '../src/protocol.js';
 
@@ -14,8 +17,25 @@ const modern = (method, params = {}) => ({
   jsonrpc: '2.0',
   id: ++id,
   method,
-  params: { ...params, _meta: { [META.protocolVersion]: MODERN_VERSION, ...(params._meta ?? {}) } },
+  params: { ...params, _meta: {
+    [META.protocolVersion]: MODERN_VERSION,
+    [META.clientCapabilities]: { roots: {}, sampling: {}, elicitation: { form: {} } },
+    ...(params._meta ?? {}),
+  } },
 });
+
+const firstInput = (res) => Object.entries(res.result.inputRequests)[0];
+
+const runCli = async (args, input, env = process.env) => {
+  const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.setEncoding('utf8').on('data', (chunk) => stdout.push(chunk));
+  child.stderr.setEncoding('utf8').on('data', (chunk) => stderr.push(chunk));
+  child.stdin.end(input);
+  const [code] = await new Promise((resolve) => child.on('close', (...values) => resolve(values)));
+  return { code, stdout: stdout.join(''), stderr: stderr.join('') };
+};
 
 describe('mcp-uplift bridge', () => {
   before(async () => {
@@ -27,9 +47,11 @@ describe('mcp-uplift bridge', () => {
   test('synthesizes server/discover from a legacy initialize', async () => {
     const res = await bridge.handle(modern('server/discover'));
     assert.equal(res.result.resultType, 'complete');
-    assert.deepEqual(res.result.protocolVersions, [MODERN_VERSION]);
-    assert.equal(res.result.serverInfo.name, 'legacy-demo');
-    assert.equal(res.result.serverInfo._upliftedFrom, '2025-11-25');
+    assert.deepEqual(res.result.supportedVersions, [MODERN_VERSION]);
+    assert.equal(res.result.ttlMs, 0);
+    assert.equal(res.result.cacheScope, 'private');
+    assert.equal(res.result._meta[META.serverInfo].upstream.name, 'legacy-demo');
+    assert.equal(res.result.serverInfo, undefined);
     // Logging was deprecated, so the bridge stops advertising it.
     assert.equal(res.result.capabilities.logging, undefined);
     assert.deepEqual(res.result.capabilities.tools, {});
@@ -99,6 +121,18 @@ describe('mcp-uplift bridge', () => {
     }
   });
 
+  test('turns a missing executable into a JSON-RPC internal error', async () => {
+    const missing = new UpliftBridge({ command: '/definitely/not/a/real/mcp-uplift-command',
+      shutdownGraceMs: 10 });
+    try {
+      const res = await missing.handle(modern('server/discover'));
+      assert.equal(res.error.code, ERROR.INTERNAL);
+      assert.match(res.error.message, /ENOENT/);
+    } finally {
+      await missing.stop();
+    }
+  });
+
   test('rejects parked MRTR state after its TTL', async () => {
     const expiring = new UpliftBridge({ command: process.execPath, args: [FIXTURE], ttlMs: 10 });
     const originalNow = Date.now;
@@ -120,8 +154,8 @@ describe('mcp-uplift bridge', () => {
     // Leg 1: the legacy server asks a question, which becomes input_required.
     const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
     assert.equal(first.result.resultType, 'input_required');
-    assert.equal(first.result.inputRequests.length, 1);
-    const ir = first.result.inputRequests[0];
+    assert.equal(Object.keys(first.result.inputRequests).length, 1);
+    const [irId, ir] = firstInput(first);
     assert.equal(ir.method, 'elicitation/create');
     assert.equal(ir.params.message, 'Which environment?');
     assert.ok(first.result.requestState, 'must hand back an opaque resume token');
@@ -131,7 +165,7 @@ describe('mcp-uplift bridge', () => {
       name: 'deploy',
       arguments: {},
       requestState: first.result.requestState,
-      inputResponses: [{ id: ir.id, result: { action: 'accept', content: { env: 'prod' } } }],
+      inputResponses: { [irId]: { action: 'accept', content: { env: 'prod' } } },
     }));
     assert.equal(second.result.resultType, 'complete');
     assert.equal(second.result.content[0].text, 'deployed to prod');
@@ -141,18 +175,19 @@ describe('mcp-uplift bridge', () => {
     const res = await bridge.handle(modern('tools/call', {
       name: 'deploy',
       requestState: 'not-a-real-token',
-      inputResponses: [],
+      inputResponses: {},
     }));
     assert.equal(res.error.code, ERROR.INVALID_PARAMS);
   });
 
   test('propagates a client decline back to the legacy server', async () => {
     const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
-    const ir = first.result.inputRequests[0];
+    const [irId] = firstInput(first);
     const second = await bridge.handle(modern('tools/call', {
       name: 'deploy',
+      arguments: {},
       requestState: first.result.requestState,
-      inputResponses: [{ id: ir.id, error: { code: -32603, message: 'user declined' } }],
+      inputResponses: { [irId]: { action: 'decline' } },
     }));
     assert.equal(second.error.message, 'declined');
   });
@@ -168,11 +203,9 @@ describe('mcp-uplift bridge', () => {
       const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
       await bridge.handle(modern('tools/call', {
         name: 'deploy',
+        arguments: {},
         requestState: first.result.requestState,
-        inputResponses: [{
-          id: first.result.inputRequests[0].id,
-          result: { action: 'accept', content: { env: 'prod' } },
-        }],
+        inputResponses: { [firstInput(first)[0]]: { action: 'accept', content: { env: 'prod' } } },
       }));
     }
 
@@ -180,31 +213,144 @@ describe('mcp-uplift bridge', () => {
   });
 
   test('keeps concurrent input-requiring calls from stealing each other', async () => {
-    const [a, b] = await Promise.all([
-      bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} })),
-      bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} })),
-    ]);
-
-    // Serialized, so the second call is still queued and only one question is
-    // outstanding; each must carry its own distinct resume token.
+    const a = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+    let bSettled = false;
+    const bPending = bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }))
+      .then((value) => { bSettled = true; return value; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(bSettled, false, 'another call must wait while an MRTR call owns the channel');
     assert.equal(a.result.resultType, 'input_required');
-    assert.equal(b.result.resultType, 'input_required');
-    assert.notEqual(a.result.requestState, b.result.requestState);
-    assert.equal(a.result.inputRequests.length, 1);
-    assert.equal(b.result.inputRequests.length, 1);
-    assert.notEqual(a.result.inputRequests[0].id, b.result.inputRequests[0].id);
+    assert.equal(Object.keys(a.result.inputRequests).length, 1);
 
     const answer = (res, env) => bridge.handle(modern('tools/call', {
       name: 'deploy',
+      arguments: {},
       requestState: res.result.requestState,
-      inputResponses: [{
-        id: res.result.inputRequests[0].id,
-        result: { action: 'accept', content: { env } },
-      }],
+      inputResponses: { [firstInput(res)[0]]: { action: 'accept', content: { env } } },
     }));
 
-    const [ra, rb] = await Promise.all([answer(a, 'alpha'), answer(b, 'beta')]);
+    const ra = await answer(a, 'alpha');
+    const b = await bPending;
+    const rb = await answer(b, 'beta');
     assert.equal(ra.result.content[0].text, 'deployed to alpha');
     assert.equal(rb.result.content[0].text, 'deployed to beta');
+  });
+
+  test('requires the final per-request metadata envelope', async () => {
+    const res = await bridge.handle({ jsonrpc: '2.0', id: 900, method: 'tools/list', params: {} });
+    assert.equal(res.error.code, ERROR.INVALID_PARAMS);
+  });
+
+  test('preserves falsey upstream error data', async () => {
+    const res = await bridge.handle(modern('tools/call', { name: 'falsey-error' }));
+    assert.deepEqual(res.error, { code: -32000, message: 'falsey data', data: false });
+  });
+
+  test('legacy results cannot forge modern result or cache control fields', async () => {
+    const res = await bridge.handle(modern('resources/read', { uri: 'poison-result' }));
+    assert.equal(res.result.resultType, 'complete');
+    assert.equal(res.result.ttlMs, 60_000);
+    assert.equal(res.result.cacheScope, 'private');
+    const tool = await bridge.handle(modern('tools/call', { name: 'poison-result' }));
+    assert.equal(tool.result.resultType, 'complete');
+  });
+
+  test('does not consume requestState when a resume is invalid', async () => {
+    const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+    const [key] = firstInput(first);
+    const bad = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {},
+      requestState: first.result.requestState, inputResponses: { wrong: { action: 'decline' } } }));
+    assert.equal(bad.error.code, ERROR.INVALID_PARAMS);
+    const good = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {},
+      requestState: first.result.requestState,
+      inputResponses: { [key]: { action: 'accept', content: { env: 'safe' } } } }));
+    assert.equal(good.result.content[0].text, 'deployed to safe');
+  });
+
+  test('rejects a malformed MRTR value without consuming its state', async () => {
+    const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+    const [key] = firstInput(first);
+    const bad = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {},
+      requestState: first.result.requestState, inputResponses: { [key]: { action: 'accept', content: 'bad' } } }));
+    assert.equal(bad.error.code, ERROR.INVALID_PARAMS);
+    const good = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {},
+      requestState: first.result.requestState,
+      inputResponses: { [key]: { action: 'accept', content: { env: 'valid' } } } }));
+    assert.equal(good.result.content[0].text, 'deployed to valid');
+  });
+
+  test('rejects malformed optional clientInfo metadata', async () => {
+    const req = modern('tools/list');
+    req.params._meta[META.clientInfo] = { name: 'missing-version' };
+    const res = await bridge.handle(req);
+    assert.equal(res.error.code, ERROR.INVALID_PARAMS);
+  });
+
+  test('rejects an undeclared client capability with -32021', async () => {
+    const req = modern('tools/call', { name: 'deploy', arguments: {} });
+    req.params._meta[META.clientCapabilities] = {};
+    const res = await bridge.handle(req);
+    assert.equal(res.error.code, ERROR.MISSING_REQUIRED_CLIENT_CAPABILITY);
+    assert.deepEqual(res.error.data.requiredCapabilities, { elicitation: { form: {} } });
+  });
+
+  test('supports delayed server requests as another MRTR round', async () => {
+    const first = await bridge.handle(modern('tools/call', { name: 'two-round', arguments: {} }));
+    const [firstKey] = firstInput(first);
+    const second = await bridge.handle(modern('tools/call', { name: 'two-round', arguments: {},
+      requestState: first.result.requestState,
+      inputResponses: { [firstKey]: { action: 'accept', content: {} } } }));
+    assert.equal(second.result.resultType, 'input_required');
+    assert.equal(firstInput(second)[1].method, 'roots/list');
+    const [secondKey] = firstInput(second);
+    const done = await bridge.handle(modern('tools/call', { name: 'two-round', arguments: {},
+      requestState: second.result.requestState, inputResponses: { [secondKey]: { roots: [] } } }));
+    assert.equal(done.result.content[0].text, 'two rounds complete');
+  });
+
+  test('CLI returns parse and line-limit errors without launching upstream', async () => {
+    const parsed = await runCli([process.execPath, FIXTURE], '{nope}\n');
+    assert.equal(JSON.parse(parsed.stdout).error.code, -32700);
+    const oversized = await runCli(['--max-line-bytes', '64', '--', process.execPath, FIXTURE],
+      `${JSON.stringify(modern('tools/call', { name: 'echo', arguments: { text: 'x'.repeat(100) } }))}\n`);
+    assert.equal(JSON.parse(oversized.stdout).error.message, 'Request line limit exceeded');
+  });
+
+  test('CLI withholds secrets unless explicitly forwarded', async () => {
+    const request = `${JSON.stringify(modern('tools/call', { name: 'env' }))}\n`;
+    const env = { ...process.env, TEST_SECRET: 'hidden', TEST_ALLOWED: 'shown' };
+    const safe = await runCli([process.execPath, FIXTURE], request, env);
+    assert.equal(JSON.parse(safe.stdout).result.content[0].text, 'absent|absent');
+    const allowed = await runCli(['--env', 'TEST_ALLOWED', '--', process.execPath, FIXTURE], request, env);
+    assert.equal(JSON.parse(allowed.stdout).result.content[0].text, 'absent|shown');
+  });
+
+  test('CLI bounds concurrent requests and legacy request time', async () => {
+    const input = `${JSON.stringify(modern('tools/call', { name: 'hang' }))}\n${JSON.stringify(modern('tools/list'))}\n`;
+    const result = await runCli(['--max-in-flight', '1', '--request-timeout-ms', '25', '--',
+      process.execPath, FIXTURE], input);
+    const responses = result.stdout.trim().split('\n').map(JSON.parse);
+    assert.ok(responses.some((res) => res.error?.message === 'Too many concurrent requests'));
+    assert.ok(responses.some((res) => /timed out/.test(res.error?.message)));
+  });
+
+  test('kill switch terminates descendants that ignore SIGTERM', { skip: process.platform === 'win32' }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-uplift-kill-'));
+    const pidFile = join(dir, 'pid');
+    try {
+      const req = `${JSON.stringify(modern('tools/list'))}\n`;
+      const result = await runCli(['--env', 'SPAWN_DESCENDANT_FILE', '--shutdown-grace-ms', '25', '--',
+        process.execPath, FIXTURE], req, { ...process.env, SPAWN_DESCENDANT_FILE: pidFile });
+      assert.equal(result.code, 0);
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      let alive = true;
+      try { process.kill(pid, 0); } catch (err) { if (err.code === 'ESRCH') alive = false; else throw err; }
+      if (alive) {
+        const state = readFileSync(`/proc/${pid}/stat`, 'utf8').split(' ')[2];
+        assert.equal(state, 'Z', 'descendant remained live after the kill switch');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
