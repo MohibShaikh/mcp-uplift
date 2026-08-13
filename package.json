@@ -1,0 +1,19 @@
+{
+  "name": "mcp-uplift",
+  "version": "0.1.0",
+  "description": "Run any legacy MCP server (2025-11-25 and earlier) as a modern 2026-07-28 stateless server. Handshake, sessions, and server-initiated requests are translated for you.",
+  "type": "module",
+  "bin": {
+    "mcp-uplift": "./src/cli.js"
+  },
+  "main": "./src/bridge.js",
+  "exports": {
+    ".": "./src/bridge.js"
+  },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": ["mcp", "model-context-protocol", "proxy", "bridge", "compatibility", "2026-07-28"],
+  "license": "MIT"
+}
