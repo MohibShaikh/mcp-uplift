@@ -1,10 +1,12 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { UpliftBridge } from '../src/bridge.js';
 import { MODERN_VERSION, META, ERROR } from '../src/protocol.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/legacy-server.js', import.meta.url));
+const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 
 let bridge;
 let id = 0;
@@ -63,6 +65,55 @@ describe('mcp-uplift bridge', () => {
     const res = await bridge.handle(modern('tools/call', { name: 'echo', arguments: { text: 'hi' } }));
     assert.equal(res.result.resultType, 'complete');
     assert.equal(res.result.content[0].text, 'hi');
+  });
+
+  test('drops legacy notifications and writes one clean response', async () => {
+    const child = spawn(process.execPath, [CLI, process.execPath, FIXTURE], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const chunks = [];
+    child.stdout.setEncoding('utf8').on('data', (chunk) => chunks.push(chunk));
+    child.stdin.end(JSON.stringify(modern('tools/call', { name: 'notify', arguments: {} })) + '\n');
+    const [code] = await new Promise((resolve) => child.on('close', (...args) => resolve(args)));
+    assert.equal(code, 0);
+    const lines = chunks.join('').trim().split('\n');
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]).result.content[0].text, 'clean');
+  });
+
+  test('maps resource-not-found and preserves every other upstream error', async () => {
+    const missing = await bridge.handle(modern('tools/call', { name: 'resource-error' }));
+    assert.deepEqual(missing.error, { code: -32602, message: 'missing resource', data: { uri: 'file:///missing' } });
+    const custom = await bridge.handle(modern('tools/call', { name: 'custom-error' }));
+    assert.deepEqual(custom.error, { code: -32000, message: 'custom failure', data: { retryable: false } });
+  });
+
+  test('turns an upstream crash into a JSON-RPC internal error', async () => {
+    const crashing = new UpliftBridge({ command: process.execPath, args: [FIXTURE] });
+    try {
+      await crashing.start();
+      const res = await crashing.handle(modern('tools/call', { name: 'crash' }));
+      assert.equal(res.jsonrpc, '2.0');
+      assert.equal(res.error.code, ERROR.INTERNAL);
+      assert.match(res.error.message, /exited \(code 7\)/);
+    } finally {
+      crashing.stop();
+    }
+  });
+
+  test('rejects parked MRTR state after its TTL', async () => {
+    const expiring = new UpliftBridge({ command: process.execPath, args: [FIXTURE], ttlMs: 10 });
+    const originalNow = Date.now;
+    let now = 100;
+    Date.now = () => now;
+    try {
+      await expiring.start();
+      const first = await expiring.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+      now = 111;
+      const res = await expiring.handle(modern('tools/call', { name: 'deploy', requestState: first.result.requestState }));
+      assert.equal(res.error.code, ERROR.INVALID_PARAMS);
+    } finally {
+      Date.now = originalNow;
+      expiring.stop();
+    }
   });
 
   test('converts a server-initiated elicitation into an MRTR round trip', async () => {

@@ -22,11 +22,13 @@ export class UpliftBridge {
 
   constructor({ command, args, env, cwd, onStderr, ttlMs = DEFAULT_TTL_MS } = {}) {
     this.legacy = new LegacyClient({ command, args, env, cwd, onStderr });
-    this.mrtr = new MrtrStore();
+    this.mrtr = new MrtrStore({ ttlMs });
     this.ttlMs = ttlMs;
     /** legacy server-initiated requests seen while a call is in flight */
     this.pendingServerRequests = [];
     this.legacy.on('server-request', (msg) => this.pendingServerRequests.push(msg));
+    // This one-response stdio bridge has no response stream for notifications.
+    this.legacy.on('notification', () => {});
   }
 
   async start() {
@@ -65,7 +67,10 @@ export class UpliftBridge {
 
       return await this.#forward(id, req);
     } catch (err) {
-      if (err.rpc) return this.#error(id, err.rpc.code, err.rpc.message, err.rpc.data);
+      if (err.rpc) {
+        const code = err.rpc.code === -32002 ? ERROR.INVALID_PARAMS : err.rpc.code;
+        return this.#error(id, code, err.rpc.message, err.rpc.data);
+      }
       return this.#error(id, ERROR.INTERNAL, err.message);
     }
   }

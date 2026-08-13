@@ -79,6 +79,23 @@ function handle(msg) {
       });
       return;
     }
+    if (params.name === 'notify') {
+      write({ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1, total: 1 } });
+      write({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', data: 'done' } });
+      write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'clean' }] } });
+      return;
+    }
+    if (params.name === 'resource-error') {
+      write({ jsonrpc: '2.0', id, error: { code: -32002, message: 'missing resource', data: { uri: 'file:///missing' } } });
+      return;
+    }
+    if (params.name === 'custom-error') {
+      write({ jsonrpc: '2.0', id, error: { code: -32000, message: 'custom failure', data: { retryable: false } } });
+      return;
+    }
+    if (params.name === 'crash') {
+      process.exit(7);
+    }
     if (params.name === 'deploy') {
       // Server-initiated request: impossible under 2026-07-28.
       const sid = nextServerId++;
