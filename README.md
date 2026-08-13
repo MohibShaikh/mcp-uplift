@@ -9,6 +9,13 @@ legacy stdio server and presents it as a modern stateless server.
 > permissions. This bridge is not a sandbox. Only run packages and commands you
 > trust.
 
+## Demo
+
+https://github.com/MohibShaikh/mcp-uplift/raw/main/docs/demo.webm
+
+A legacy stdio server running behind the `2026-07-28` protocol.
+If the player does not load, [download the clip](docs/demo.webm).
+
 ## Usage
 
 Run without installing:
