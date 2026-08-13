@@ -13,9 +13,7 @@
   "files": [
     "src",
     "README.md",
-    "LICENSE",
-    "DECISIONS.md",
-    "COMPATIBILITY.md"
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",

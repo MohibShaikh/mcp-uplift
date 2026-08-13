@@ -113,8 +113,7 @@ Real-world validation confirmed discovery and tool listing against 39 distinct
 legacy MCP packages. The official filesystem server also completed a real
 `roots/list` MRTR round trip and returned all 14 tools. These are tested
 examples, not a guarantee that every server or session-dependent behavior can
-be translated. See [COMPATIBILITY.md](COMPATIBILITY.md) for the exact method
-and its limits.
+be translated.
 
 - **All legacy calls are serialized.** The
   legacy protocol never links a `sampling/createMessage`, `elicitation/create`,
