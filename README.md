@@ -11,10 +11,12 @@ legacy stdio server and presents it as a modern stateless server.
 
 ## Demo
 
-https://github.com/MohibShaikh/mcp-uplift/raw/main/docs/demo.webm
+![mcp-uplift translating a real legacy MCP server](https://github.com/MohibShaikh/mcp-uplift/raw/main/docs/demo.gif)
 
-A legacy stdio server running behind the `2026-07-28` protocol.
-If the player does not load, [download the clip](docs/demo.webm).
+The unmodified official `@modelcontextprotocol/server-filesystem` running behind
+the `2026-07-28` protocol: `server/discover` is synthesized from the legacy
+handshake, the server's own `roots/list` request becomes a keyed `input_required`
+result, and answering it resumes the call and returns all 14 tools.
 
 ## Usage
 
