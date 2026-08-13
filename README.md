@@ -107,6 +107,49 @@ call.
 | Removed methods | Rejected with `-32601` method-not-found |
 | Upstream failures | Returned as `-32603` internal errors |
 
+## Answering a server's question
+
+A legacy server can interrupt its own call to ask the client something.
+Because a modern client cannot receive that push, the bridge returns an
+`input_required` result instead, keyed by request id:
+
+```json
+{
+  "resultType": "input_required",
+  "inputRequests": {
+    "ir_1000": {
+      "method": "elicitation/create",
+      "params": { "message": "Which environment?" }
+    }
+  },
+  "requestState": "c0a2db7b-62bc-4420-b2e9-31da87f8f999"
+}
+```
+
+To resume, send the **same request again** with the `requestState` you were
+given and an `inputResponses` map using those same keys. Each value is the
+response body itself, not wrapped in `result`:
+
+```json
+{
+  "name": "deploy",
+  "arguments": {},
+  "requestState": "c0a2db7b-62bc-4420-b2e9-31da87f8f999",
+  "inputResponses": {
+    "ir_1000": { "action": "accept", "content": { "env": "prod" } }
+  }
+}
+```
+
+The parked call then finishes and returns its ordinary `"complete"` result.
+Shapes per method: `elicitation/create` takes `{ action, content }` with
+`action` one of `accept`, `decline`, or `cancel`; `roots/list` takes
+`{ roots: [...] }`; `sampling/createMessage` takes `{ model, role, content }`.
+
+The resumed request must match the original, every key must be answered, and
+`requestState` is single-use and expires, so an invalid resume is rejected
+rather than half-applied.
+
 ## Known limitations
 
 Real-world validation confirmed discovery and tool listing against 39 distinct
