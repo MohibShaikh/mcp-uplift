@@ -35,11 +35,11 @@
   "author": "MohibShaikh",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MohibShaikh/ZehphyrFleet.git"
+    "url": "git+https://github.com/MohibShaikh/mcp-uplift.git"
   },
-  "homepage": "https://github.com/MohibShaikh/ZehphyrFleet#readme",
+  "homepage": "https://github.com/MohibShaikh/mcp-uplift#readme",
   "bugs": {
-    "url": "https://github.com/MohibShaikh/ZehphyrFleet/issues"
+    "url": "https://github.com/MohibShaikh/mcp-uplift/issues"
   },
   "publishConfig": {
     "access": "public"
