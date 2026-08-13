@@ -23,8 +23,19 @@ const bridge = new UpliftBridge({
 });
 
 let buf = '';
+let inFlight = 0;
+let inputEnded = false;
+
+// Responses are written in completion order, which JSON-RPC ids make safe.
+const drain = () => {
+  if (inputEnded && inFlight === 0) {
+    bridge.stop();
+    process.exit(0);
+  }
+};
+
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', async (chunk) => {
+process.stdin.on('data', (chunk) => {
   buf += chunk;
   let idx;
   while ((idx = buf.indexOf('\n')) !== -1) {
@@ -41,12 +52,17 @@ process.stdin.on('data', async (chunk) => {
     // Notifications get no response.
     if (req.id === undefined) continue;
 
-    const res = await bridge.handle(req);
-    process.stdout.write(JSON.stringify(res) + '\n');
+    inFlight++;
+    bridge.handle(req).then((res) => {
+      process.stdout.write(JSON.stringify(res) + '\n');
+      inFlight--;
+      drain();
+    });
   }
 });
 
 const shutdown = () => { bridge.stop(); process.exit(0); };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
-process.stdin.on('end', shutdown);
+// Exiting here would kill responses still being awaited.
+process.stdin.on('end', () => { inputEnded = true; drain(); });

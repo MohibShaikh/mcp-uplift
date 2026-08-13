@@ -26,6 +26,7 @@ export class MrtrStore {
    * @param {Promise} p.settle        the original in-flight legacy request
    */
   park({ inputRequests, legacyIds, settle }) {
+    this.sweep();
     const token = randomUUID();
     this.#parked.set(token, {
       inputRequests,

@@ -105,4 +105,55 @@ describe('mcp-uplift bridge', () => {
     }));
     assert.equal(second.error.message, 'declined');
   });
+
+  test('does not leak listeners across repeated round trips', async () => {
+    // 1 is the constructor's own collector; anything above it is a leak that
+    // would eventually stop the process from exiting.
+    const baseline = bridge.legacy.listenerCount('server-request');
+    assert.equal(baseline, 1);
+
+    for (let i = 0; i < 10; i++) {
+      await bridge.handle(modern('tools/call', { name: 'echo', arguments: { text: `n${i}` } }));
+      const first = await bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+      await bridge.handle(modern('tools/call', {
+        name: 'deploy',
+        requestState: first.result.requestState,
+        inputResponses: [{
+          id: first.result.inputRequests[0].id,
+          result: { action: 'accept', content: { env: 'prod' } },
+        }],
+      }));
+    }
+
+    assert.equal(bridge.legacy.listenerCount('server-request'), baseline);
+  });
+
+  test('keeps concurrent input-requiring calls from stealing each other', async () => {
+    const [a, b] = await Promise.all([
+      bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} })),
+      bridge.handle(modern('tools/call', { name: 'deploy', arguments: {} })),
+    ]);
+
+    // Serialized, so the second call is still queued and only one question is
+    // outstanding; each must carry its own distinct resume token.
+    assert.equal(a.result.resultType, 'input_required');
+    assert.equal(b.result.resultType, 'input_required');
+    assert.notEqual(a.result.requestState, b.result.requestState);
+    assert.equal(a.result.inputRequests.length, 1);
+    assert.equal(b.result.inputRequests.length, 1);
+    assert.notEqual(a.result.inputRequests[0].id, b.result.inputRequests[0].id);
+
+    const answer = (res, env) => bridge.handle(modern('tools/call', {
+      name: 'deploy',
+      requestState: res.result.requestState,
+      inputResponses: [{
+        id: res.result.inputRequests[0].id,
+        result: { action: 'accept', content: { env } },
+      }],
+    }));
+
+    const [ra, rb] = await Promise.all([answer(a, 'alpha'), answer(b, 'beta')]);
+    assert.equal(ra.result.content[0].text, 'deployed to alpha');
+    assert.equal(rb.result.content[0].text, 'deployed to beta');
+  });
 });

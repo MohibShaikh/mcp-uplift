@@ -18,6 +18,8 @@ const BRIDGE_INFO = { name: 'mcp-uplift', version: '0.1.0' };
  *  - translate server-initiated requests into MRTR input_required results
  */
 export class UpliftBridge {
+  #lock = Promise.resolve();
+
   constructor({ command, args, env, cwd, onStderr, ttlMs = DEFAULT_TTL_MS } = {}) {
     this.legacy = new LegacyClient({ command, args, env, cwd, onStderr });
     this.mrtr = new MrtrStore();
@@ -95,49 +97,18 @@ export class UpliftBridge {
 
   async #forward(id, req) {
     await this.legacy.start();
+
+    // A server-initiated request carries no link back to the call that caused
+    // it, so the legs that can produce one are serialized: only one leg is ever
+    // in flight, which makes attribution unambiguous. A parked call is blocked
+    // awaiting our answer and cannot ask anything meanwhile, so the lock is
+    // released while parked rather than held across the round trip.
+    const release = await this.#acquire();
     this.pendingServerRequests = [];
 
     const params = stripModernMeta(req.params);
     const call = this.legacy.request(req.method, params);
-
-    // Race the call against any server-initiated request it triggers. If the
-    // legacy server asks us something, we cannot answer inline under MRTR.
-    const outcome = await Promise.race([
-      call.then((result) => ({ kind: 'result', result })),
-      this.#waitForServerRequest().then((msgs) => ({ kind: 'input', msgs })),
-    ]);
-
-    if (outcome.kind === 'input') {
-      const inputRequests = outcome.msgs.map(toInputRequest);
-      const legacyIds = new Map(outcome.msgs.map((m) => [`ir_${m.id}`, m.id]));
-      const token = this.mrtr.park({ inputRequests, legacyIds, settle: call });
-      return this.#ok(id, inputRequiredResult({ inputRequests, requestState: token }));
-    }
-
-    return this.#ok(id, this.#decorate(req.method, outcome.result));
-  }
-
-  /** Resolves once the legacy server has pushed at least one request at us. */
-  #waitForServerRequest() {
-    return new Promise((resolve) => {
-      const check = () => {
-        if (this.pendingServerRequests.length) {
-          const msgs = this.pendingServerRequests;
-          this.pendingServerRequests = [];
-          resolve(msgs);
-          return true;
-        }
-        return false;
-      };
-      if (check()) return;
-      const onReq = () => {
-        // Collect requests arriving in the same tick before resuming.
-        setImmediate(() => {
-          if (check()) this.legacy.off('server-request', onReq);
-        });
-      };
-      this.legacy.on('server-request', onReq);
-    });
+    return await this.#settle(id, req.method, call, release);
   }
 
   /** Second leg of MRTR: feed the client's answers back into the legacy call. */
@@ -147,6 +118,9 @@ export class UpliftBridge {
       return this.#error(id, ERROR.INVALID_PARAMS, 'Unknown or expired requestState');
     }
 
+    // Answering revives the parked call, so this leg takes its own turn.
+    const release = await this.#acquire();
+    this.pendingServerRequests = [];
     for (const response of req.params.inputResponses ?? []) {
       const legacyId = entry.legacyIds.get(response.id);
       if (legacyId === undefined) continue;
@@ -154,22 +128,79 @@ export class UpliftBridge {
       else this.legacy.respondToServer(legacyId, response.result);
     }
 
-    // The original legacy call is still in flight; it may now complete, or ask
-    // another question, in which case we park it again.
-    this.pendingServerRequests = [];
-    const outcome = await Promise.race([
-      entry.settle.then((result) => ({ kind: 'result', result })),
-      this.#waitForServerRequest().then((msgs) => ({ kind: 'input', msgs })),
-    ]);
+    return await this.#settle(id, req.method, entry.settle, release);
+  }
+
+  /**
+   * Races an in-flight legacy call against the questions it may ask, parking it
+   * when the server wants input and releasing the lock only once it is done.
+   */
+  async #settle(id, method, call, release) {
+    const waiter = this.#waitForServerRequest();
+    let outcome;
+    try {
+      outcome = await Promise.race([
+        call.then((result) => ({ kind: 'result', result })),
+        waiter.promise.then((msgs) => ({ kind: 'input', msgs })),
+      ]);
+    } catch (err) {
+      release();
+      throw err;
+    } finally {
+      waiter.cancel();
+    }
 
     if (outcome.kind === 'input') {
       const inputRequests = outcome.msgs.map(toInputRequest);
       const legacyIds = new Map(outcome.msgs.map((m) => [`ir_${m.id}`, m.id]));
-      const token = this.mrtr.park({ inputRequests, legacyIds, settle: entry.settle });
+      const token = this.mrtr.park({ inputRequests, legacyIds, settle: call });
+      release();
       return this.#ok(id, inputRequiredResult({ inputRequests, requestState: token }));
     }
 
-    return this.#ok(id, this.#decorate(req.method, outcome.result));
+    release();
+    return this.#ok(id, this.#decorate(method, outcome.result));
+  }
+
+  /** Serializes the legs that can trigger a server-initiated request. */
+  #acquire() {
+    const prior = this.#lock;
+    let release;
+    this.#lock = new Promise((resolve) => {
+      release = () => resolve();
+    });
+    return prior.then(() => once(release));
+  }
+
+  /**
+   * Resolves once the legacy server pushes requests at us, and can be cancelled
+   * so the losing side of a race does not leak its listener.
+   */
+  #waitForServerRequest() {
+    let onReq;
+    let settled = false;
+    const promise = new Promise((resolve) => {
+      const check = () => {
+        if (settled || !this.pendingServerRequests.length) return false;
+        settled = true;
+        const msgs = this.pendingServerRequests;
+        this.pendingServerRequests = [];
+        this.legacy.off('server-request', onReq);
+        resolve(msgs);
+        return true;
+      };
+      // Requests arriving in one tick are collected before the race resolves.
+      onReq = () => setImmediate(check);
+      this.legacy.on('server-request', onReq);
+      if (this.pendingServerRequests.length) setImmediate(check);
+    });
+    return {
+      promise,
+      cancel: () => {
+        settled = true;
+        this.legacy.off('server-request', onReq);
+      },
+    };
   }
 
   /** Adds fields that 2026-07-28 requires on every result. */
@@ -198,6 +229,16 @@ export class UpliftBridge {
   stop() {
     this.legacy.stop();
   }
+}
+
+/** Releasing a lock twice would let two calls run at once, so guard it. */
+function once(fn) {
+  let called = false;
+  return () => {
+    if (called) return;
+    called = true;
+    fn();
+  };
 }
 
 /** Legacy servers reject unknown _meta keys in some SDKs, so strip ours. */
