@@ -13,35 +13,44 @@ legacy stdio server and presents it as a modern stateless server.
 
 ![mcp-uplift translating a real legacy MCP server](https://github.com/MohibShaikh/mcp-uplift/raw/main/docs/demo.gif)
 
-The unmodified official `@modelcontextprotocol/server-filesystem` running behind
-the `2026-07-28` protocol: `server/discover` is synthesized from the legacy
-handshake, the server's own `roots/list` request becomes a keyed `input_required`
-result, and answering it resumes the call and returns all 14 tools.
+The pinned, unmodified official `@modelcontextprotocol/server-filesystem@2025.8.21`
+running behind the `2026-07-28` protocol: `server/discover` is synthesized from
+the legacy handshake, the server's own `roots/list` request becomes a keyed
+`input_required` result, and answering it resumes the call and returns all 14
+tools. The second half shows a live `subscriptions/listen` stream from
+acknowledgement through `resources/list_changed` to graceful closure.
+
+Every command shown in the clip was first executed in a clean npm sandbox
+against the packed release artifact displayed onscreen.
 
 ## Usage
 
 Run without installing:
 
 ```sh
-npx mcp-uplift <legacy-command> [args...]
+npx -y mcp-uplift -- <legacy-command> [args...]
 ```
 
 For example:
 
 ```sh
-npx mcp-uplift npx -y @modelcontextprotocol/server-filesystem /tmp
+npx -y mcp-uplift -- npx -y @modelcontextprotocol/server-filesystem@2025.8.21 .
 ```
 
 The wrapped command receives a minimal environment by default. Forward a needed
 credential explicitly, before `--`:
 
 ```sh
-npx mcp-uplift --env BRAVE_API_KEY -- npx -y @modelcontextprotocol/server-brave-search
+npx -y mcp-uplift --env BRAVE_API_KEY -- npx -y @brave/brave-search-mcp-server --transport stdio
 ```
 
 `--inherit-env` is available for compatibility but exposes every environment
-variable to the wrapped process. Run `npx mcp-uplift --help` for resource and
-timeout controls.
+variable to the wrapped process. Inspect all line, buffer, concurrency,
+subscription, initialization, request, MRTR, and shutdown controls with:
+
+```sh
+npx -y mcp-uplift --help
+```
 
 ## Client configuration
 
@@ -52,7 +61,7 @@ Before, a client launches the legacy server directly:
   "mcpServers": {
     "files": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."]
     }
   }
 }
@@ -65,7 +74,7 @@ After, launch the same command through `mcp-uplift`:
   "mcpServers": {
     "files": {
       "command": "npx",
-      "args": ["mcp-uplift", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      "args": ["-y", "mcp-uplift", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."]
     }
   }
 }
@@ -198,18 +207,30 @@ how a client demultiplexes concurrent subscriptions sharing one stdio channel.
 `resources/subscribe` that `2026-07-28` removed, and URIs are reference counted,
 so two subscriptions watching one URI do not unsubscribe each other.
 
-Cancel with `notifications/cancelled` naming the listen request id. When the
-bridge itself closes a stream it answers the still-open request with an empty
-`complete` result, which is how a client tells a clean shutdown from a dropped
-transport.
+Cancel by sending `notifications/cancelled` with the listen request id:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/cancelled",
+  "params": { "requestId": "listen-1" }
+}
+```
+
+A client cancellation ends the stream without a response because the result is
+no longer wanted. When the bridge itself closes a stream, it answers the
+still-open request with an empty `complete` result, which is how a client tells
+a clean shutdown from a dropped transport.
 
 ## Known limitations
 
 Real-world validation confirmed discovery and tool listing against 39 distinct
 legacy MCP packages. The official filesystem server also completed a real
-`roots/list` MRTR round trip and returned all 14 tools. These are tested
-examples, not a guarantee that every server or session-dependent behavior can
-be translated.
+`roots/list` MRTR round trip and returned all 14 tools. A separate subscription
+sweep probed 49 published packages with no protocol failures, 11 of which
+completed the full `subscriptions/listen` lifecycle. These are tested examples,
+not a guarantee that every server or session-dependent behavior can be
+translated.
 
 - **All legacy calls are serialized.** The
   legacy protocol never links a `sampling/createMessage`, `elicitation/create`,
