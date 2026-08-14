@@ -22,12 +22,13 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: ['22', '24']
         include:
-          # `npm test` globs test/*.test.js. Node expands that itself from 22;
-          # before that it depends on the shell, so node 20 is only covered
-          # where a POSIX shell does the expanding.
+          # `npm test` names its test file rather than globbing, so node 20 runs
+          # everywhere including Windows, where cmd would not expand a glob.
           - os: ubuntu-latest
             node: '20'
           - os: macos-latest
+            node: '20'
+          - os: windows-latest
             node: '20'
     steps:
       - uses: actions/checkout@v5

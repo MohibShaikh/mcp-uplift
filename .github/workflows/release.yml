@@ -49,9 +49,11 @@ jobs:
           fi
           echo "releasing $pkg"
 
-      - run: npm test
-
       - name: Publish
+        # The suite is not run as its own step: `prepublishOnly` runs it as part
+        # of `npm publish`, so a separate step would run all 39 tests twice for
+        # no extra safety. That hook also guards a publish run by hand, which is
+        # where it matters more.
         # No NPM_TOKEN: npm detects the OIDC environment, authenticates with a
         # short-lived token scoped to this workflow, and attaches provenance
         # automatically. This also sidesteps the 2FA prompt that blocks

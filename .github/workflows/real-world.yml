@@ -16,7 +16,7 @@ on:
         description: Which half of the list to probe
         type: choice
         default: all
-        options: [all, official, community]
+        options: [all, reachable, candidates]
       timeout:
         description: Seconds allowed per package
         default: '120'
@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     # ~100 packages at up to 120s each, plus npm install time.
     timeout-minutes: 300
+    env:
+      # Hoisted to the job because `secrets` is not a context a step's `if` can
+      # read; `env` is. Reading it there fails workflow validation outright,
+      # which would stop this file running at all rather than skipping a step.
+      DISPATCH_TOKEN: ${{ secrets.PORTFOLIO_DISPATCH_TOKEN }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -72,3 +77,61 @@ jobs:
           name: subscription-results
           path: subscriptions-results.txt
           if-no-files-found: warn
+
+      - name: Publish the sweep figures
+        # The README's coverage numbers are quoted elsewhere, and a number that
+        # is copied by hand is a number that goes stale silently. Push them
+        # instead, so the reader of any other page sees this run's result.
+        #
+        # Scheduled runs only: a manual dispatch can probe --only one half of
+        # the list, and publishing that as the headline would understate
+        # coverage. Cross-repo, so GITHUB_TOKEN cannot do it; the step is
+        # skipped wherever the fine-grained token is not configured.
+        if: >-
+          success()
+          && github.event_name == 'schedule'
+          && env.DISPATCH_TOKEN != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -f subscriptions-results.txt ] || { echo 'no report; nothing to publish'; exit 0; }
+
+          # Every grep here is `|| true`. Under `set -e` with `pipefail` a grep
+          # that matches nothing kills the step, which would skip the guards
+          # below rather than let them decide — a truncated report has to fall
+          # through to "do not publish", not abort.
+          summary=$(grep -E '^PASS=' subscriptions-results.txt | tail -1 || true)
+          probed=$(grep -m1 -oE '^Probing [0-9]+' subscriptions-results.txt | grep -oE '[0-9]+' || true)
+          field() { printf '%s' "$summary" | grep -oE "$1=[0-9]+" | cut -d= -f2 || true; }
+
+          # A probe count of zero means the run died before the list was read.
+          # Publishing that would erase a real figure downstream.
+          if [ -z "${probed:-}" ] || [ "$probed" -eq 0 ]; then
+            echo 'probe count missing or zero; not publishing'
+            exit 0
+          fi
+
+          # jq --argjson rejects an empty string, so an unparseable summary must
+          # stop here rather than fail mid-payload with a confusing error.
+          failures=$(field FAIL)
+          lifecycles=$(field PASS)
+          if [ -z "$failures" ] || [ -z "$lifecycles" ]; then
+            echo 'summary line malformed; not publishing'
+            exit 0
+          fi
+
+          jq -n \
+            --arg source   'mcp-uplift' \
+            --argjson probed  "$probed" \
+            --argjson failures "$failures" \
+            --argjson lifecycles "$lifecycles" \
+            --arg runId    "${GITHUB_RUN_ID}" \
+            --arg sweptOn  "$(date -u +%F)" \
+            '{event_type: "stats-changed", client_payload: {
+                source: $source, serversProbed: $probed,
+                protocolFailures: $failures, listenLifecycles: $lifecycles,
+                runId: $runId, sweptOn: $sweptOn}}' \
+            | gh api --input - -X POST \
+                /repos/${{ github.repository_owner }}/portfolio-enhanced/dispatches
