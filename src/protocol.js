@@ -59,12 +59,43 @@ export const SERVER_INITIATED = new Set([
   'roots/list',
 ]);
 
+export const LISTEN_METHOD = 'subscriptions/listen';
+export const SUBSCRIPTION_ACK = 'notifications/subscriptions/acknowledged';
+export const CANCELLED_NOTIFICATION = 'notifications/cancelled';
+
+/**
+ * Legacy notification -> the subscriptions/listen filter field that opts into
+ * it. A notification with no entry here has no home in 2026-07-28 and is
+ * dropped: progress and logging travel with an in-flight request, not a stream.
+ */
+export const SUBSCRIBABLE = {
+  'notifications/tools/list_changed': 'toolsListChanged',
+  'notifications/prompts/list_changed': 'promptsListChanged',
+  'notifications/resources/list_changed': 'resourcesListChanged',
+  'notifications/resources/updated': 'resourceSubscriptions',
+};
+
+/**
+ * The legacy capability each filter field depends on. The acknowledgement may
+ * only claim fields the wrapped server actually supports, so a client learns
+ * what it will really receive instead of waiting on a notification that the
+ * upstream server was never able to send.
+ */
+export const SUBSCRIPTION_CAPABILITY = {
+  toolsListChanged: (caps) => Boolean(caps.tools?.listChanged),
+  promptsListChanged: (caps) => Boolean(caps.prompts?.listChanged),
+  resourcesListChanged: (caps) => Boolean(caps.resources?.listChanged),
+  resourceSubscriptions: (caps) => Boolean(caps.resources?.subscribe),
+};
+
 export const DEFAULT_TTL_MS = 60_000;
 
 export const LIMITS = {
   maxLineBytes: 4 * 1024 * 1024,
   maxBufferBytes: 8 * 1024 * 1024,
   maxInFlight: 32,
+  maxSubscriptions: 16,
+  maxSubscriptionUris: 256,
   initializeTimeoutMs: 60_000,
   requestTimeoutMs: 120_000,
   shutdownGraceMs: 3_000,

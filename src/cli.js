@@ -13,6 +13,7 @@ options:
   --max-line-bytes N            default ${LIMITS.maxLineBytes}
   --max-buffer-bytes N          default ${LIMITS.maxBufferBytes}
   --max-in-flight N             default ${LIMITS.maxInFlight}
+  --max-subscriptions N         default ${LIMITS.maxSubscriptions}
   --initialize-timeout-ms N     default ${LIMITS.initializeTimeoutMs}
   --request-timeout-ms N        default ${LIMITS.requestTimeoutMs}
   --mrtr-ttl-ms N               default 300000
@@ -31,14 +32,6 @@ if (options.help || !options.command.length) {
   process.exit(options.help ? 0 : 1);
 }
 
-const bridge = new UpliftBridge({
-  command: options.command[0], args: options.command.slice(1), env: options.env,
-  ttlMs: options.mrtrTtlMs, maxLineBytes: options.maxLineBytes,
-  maxBufferBytes: options.maxBufferBytes, initializeTimeoutMs: options.initializeTimeoutMs,
-  requestTimeoutMs: options.requestTimeoutMs, shutdownGraceMs: options.shutdownGraceMs,
-  onStderr: (data) => process.stderr.write(data),
-});
-
 let buffer = '';
 let inFlight = 0;
 let inputEnded = false;
@@ -46,10 +39,25 @@ let shuttingDown = false;
 const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const error = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
+const bridge = new UpliftBridge({
+  command: options.command[0], args: options.command.slice(1), env: options.env,
+  ttlMs: options.mrtrTtlMs, maxLineBytes: options.maxLineBytes,
+  maxBufferBytes: options.maxBufferBytes, initializeTimeoutMs: options.initializeTimeoutMs,
+  requestTimeoutMs: options.requestTimeoutMs, shutdownGraceMs: options.shutdownGraceMs,
+  maxSubscriptions: options.maxSubscriptions,
+  onStderr: (data) => process.stderr.write(data),
+  // Subscription traffic is not the answer to the request being handled, so it
+  // is written as it happens rather than returned.
+  onMessage: write,
+});
+
 async function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   await bridge.stop();
+  // stop() writes the closing result for any open subscription. Writes to a
+  // pipe are asynchronous, so exiting here would truncate them.
+  await new Promise((resolve) => process.stdout.write('', resolve));
   process.exit(code);
 }
 
@@ -77,13 +85,20 @@ function dispatch(line) {
     write(error(null, -32700, 'Parse error'));
     return;
   }
-  if (request?.id === undefined) return;
+  // A notification carries no id and gets no reply; cancellation arrives this way.
+  if (request?.id === undefined) {
+    if (typeof request?.method === 'string') bridge.handleNotification(request);
+    return;
+  }
   if (inFlight >= options.maxInFlight) {
     write(error(request.id, -32000, 'Too many concurrent requests'));
     return;
   }
   inFlight++;
-  bridge.handle(request).then(write, (err) => write(error(request.id, -32603, err.message)))
+  // A null response means the request stays open, as subscriptions/listen does.
+  bridge.handle(request)
+    .then((response) => { if (response) write(response); },
+      (err) => write(error(request.id, -32603, err.message)))
     .finally(() => { inFlight--; drain(); });
 }
 
@@ -110,7 +125,8 @@ function parseArgs(argv) {
   const values = { ...LIMITS, mrtrTtlMs: 300_000, inheritEnv: false, envNames: [] };
   const numeric = new Map([
     ['--max-line-bytes', 'maxLineBytes'], ['--max-buffer-bytes', 'maxBufferBytes'],
-    ['--max-in-flight', 'maxInFlight'], ['--initialize-timeout-ms', 'initializeTimeoutMs'],
+    ['--max-in-flight', 'maxInFlight'], ['--max-subscriptions', 'maxSubscriptions'],
+    ['--initialize-timeout-ms', 'initializeTimeoutMs'],
     ['--request-timeout-ms', 'requestTimeoutMs'], ['--mrtr-ttl-ms', 'mrtrTtlMs'],
     ['--shutdown-grace-ms', 'shutdownGraceMs'],
   ]);

@@ -1,8 +1,9 @@
 import { LegacyClient } from './legacy-client.js';
 import { MrtrStore, toInputRequest, inputRequiredResult } from './mrtr.js';
+import { SubscriptionStore, negotiateFilter, validFilter } from './subscriptions.js';
 import {
   MODERN_VERSION, META, ERROR, REMOVED_METHODS, CACHEABLE_METHODS,
-  DEFAULT_TTL_MS,
+  DEFAULT_TTL_MS, LIMITS, LISTEN_METHOD, SUBSCRIPTION_ACK, CANCELLED_NOTIFICATION,
 } from './protocol.js';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -21,15 +22,21 @@ const BRIDGE_INFO = { name: 'mcp-uplift', version: '0.1.0' };
 export class UpliftBridge {
   #lock = Promise.resolve();
 
-  constructor({ command, args, env, cwd, onStderr, ttlMs = DEFAULT_TTL_MS, ...limits } = {}) {
+  constructor({ command, args, env, cwd, onStderr, onMessage, ttlMs = DEFAULT_TTL_MS,
+    maxSubscriptions = LIMITS.maxSubscriptions,
+    maxSubscriptionUris = LIMITS.maxSubscriptionUris, ...limits } = {}) {
     this.legacy = new LegacyClient({ command, args, env, cwd, onStderr, ...limits });
     this.mrtr = new MrtrStore({ ttlMs });
+    this.subscriptions = new SubscriptionStore();
     this.ttlMs = ttlMs;
+    this.maxSubscriptions = maxSubscriptions;
+    this.maxSubscriptionUris = maxSubscriptionUris;
+    /** Writes messages that are not the response to a request being handled. */
+    this.onMessage = onMessage ?? (() => {});
     /** legacy server-initiated requests seen while a call is in flight */
     this.pendingServerRequests = [];
     this.legacy.on('server-request', (msg) => this.pendingServerRequests.push(msg));
-    // This one-response stdio bridge has no response stream for notifications.
-    this.legacy.on('notification', () => {});
+    this.legacy.on('notification', (msg) => this.#fanOut(msg));
   }
 
   async start() {
@@ -69,6 +76,9 @@ export class UpliftBridge {
       }
 
       if (req.method === 'server/discover') return this.#ok(id, this.#decorate(req.method, await this.#discover()));
+
+      // Stays open: its response is withheld until the stream closes.
+      if (req.method === LISTEN_METHOD) return await this.#listen(id, req);
 
       if (REMOVED_METHODS.has(req.method)) {
         return this.#error(id, ERROR.METHOD_NOT_FOUND,
@@ -111,6 +121,127 @@ export class UpliftBridge {
       cacheScope: 'private',
       instructions: init.instructions,
     };
+  }
+
+  /**
+   * Opens a notification stream. 2026-07-28 keeps the request open for the life
+   * of the subscription, so this returns null: the caller writes nothing now,
+   * and the JSON-RPC response is emitted later as the closing message.
+   */
+  async #listen(id, req) {
+    await this.legacy.start();
+
+    const requested = req.params.notifications;
+    if (!validFilter(requested)) {
+      return this.#error(id, ERROR.INVALID_PARAMS, 'Invalid notifications filter');
+    }
+    if (this.subscriptions.has(id)) {
+      return this.#error(id, ERROR.INVALID_PARAMS, 'Subscription id already in use');
+    }
+    if (this.subscriptions.size >= this.maxSubscriptions) {
+      return this.#error(id, ERROR.INVALID_PARAMS, 'Too many open subscriptions');
+    }
+    // Each URI costs one upstream call, so the list is bounded before any of
+    // it is acted on rather than after the legacy server is already busy.
+    if ((requested?.resourceSubscriptions?.length ?? 0) > this.maxSubscriptionUris) {
+      return this.#error(id, ERROR.INVALID_PARAMS, 'Too many resource subscriptions');
+    }
+
+    const capabilities = this.legacy.initializeResult?.capabilities ?? {};
+    const filter = negotiateFilter(requested ?? {}, capabilities);
+
+    // Legacy servers only report updates for URIs registered through the
+    // resources/subscribe call that 2026-07-28 removed, so the bridge makes it
+    // on the client's behalf. A URI already watched needs no second call.
+    const wanted = filter.resourceSubscriptions ?? [];
+    if (wanted.length) {
+      const novel = this.subscriptions.novel(wanted);
+      const accepted = await this.#subscribeUpstream(novel);
+      filter.resourceSubscriptions = wanted.filter((uri) => !novel.includes(uri) || accepted.has(uri));
+      if (!filter.resourceSubscriptions.length) delete filter.resourceSubscriptions;
+    }
+
+    // Registered only now, so nothing can route to this stream before its
+    // acknowledgement, which the spec requires to be its first message.
+    this.subscriptions.add(id, filter);
+    this.onMessage({
+      jsonrpc: '2.0',
+      method: SUBSCRIPTION_ACK,
+      params: { _meta: { [META.subscriptionId]: id }, notifications: filter },
+    });
+    return null;
+  }
+
+  /**
+   * Registers URIs upstream. Serialized against calls that can ask the client
+   * questions, but only for the duration of these calls: a subscription outlives
+   * any single request, and holding the lock for its lifetime would stall the
+   * bridge. Returns the URIs the legacy server accepted.
+   */
+  async #subscribeUpstream(uris) {
+    const accepted = new Set();
+    if (!uris.length) return accepted;
+    const release = await this.#acquire();
+    try {
+      for (const uri of uris) {
+        try {
+          await this.legacy.request('resources/subscribe', { uri });
+          accepted.add(uri);
+        } catch {
+          // A refused URI is reported by omission from the acknowledged filter.
+        }
+      }
+    } finally {
+      // Nothing here can be answered through MRTR, so a server that asks
+      // anyway is told no rather than left waiting on a dead request.
+      for (const msg of this.pendingServerRequests) {
+        this.legacy.rejectServer(msg.id, 'cannot request input while opening a subscription');
+      }
+      this.pendingServerRequests = [];
+      release();
+    }
+    return accepted;
+  }
+
+  /** Delivers a legacy notification to every stream that opted into it. */
+  #fanOut(msg) {
+    for (const id of this.subscriptions.match(msg.method, msg.params)) {
+      const params = { ...(msg.params ?? {}) };
+      params._meta = { ...(params._meta ?? {}), [META.subscriptionId]: id };
+      this.onMessage({ jsonrpc: '2.0', method: msg.method, params });
+    }
+  }
+
+  /** Handles a notification sent by the modern client. */
+  handleNotification(msg) {
+    if (msg?.method !== CANCELLED_NOTIFICATION) return;
+    const id = msg.params?.requestId;
+    if (id === undefined || !this.subscriptions.has(id)) return;
+    // A cancelled request gets no response, so the stream just goes quiet.
+    void this.#closeSubscription(id, false);
+  }
+
+  /**
+   * Tears a stream down, unsubscribing any URI that has lost its last watcher.
+   * Closure initiated by the bridge answers the still-open request, which is
+   * how a client tells a clean shutdown from a dropped transport.
+   */
+  async #closeSubscription(id, respond) {
+    const removed = this.subscriptions.delete(id);
+    if (!removed) return;
+    if (respond) {
+      this.onMessage(this.#ok(id, {
+        resultType: 'complete',
+        _meta: { [META.subscriptionId]: id },
+      }));
+    }
+    for (const uri of removed.released) {
+      try {
+        await this.legacy.request('resources/unsubscribe', { uri });
+      } catch {
+        // The stream is already gone; a failed cleanup has nothing left to break.
+      }
+    }
   }
 
   async #forward(id, req) {
@@ -265,7 +396,23 @@ export class UpliftBridge {
     return { jsonrpc: '2.0', id, error: data !== undefined ? { code, message, data } : { code, message } };
   }
 
+  /**
+   * Answers every open subscription before the transport goes away, so a client
+   * sees a clean end rather than an unexplained silence it may try to reconnect
+   * after. Upstream unsubscribes are skipped: the server is about to exit.
+   */
+  #closeAllSubscriptions() {
+    for (const id of this.subscriptions.ids()) {
+      this.subscriptions.delete(id);
+      this.onMessage(this.#ok(id, {
+        resultType: 'complete',
+        _meta: { [META.subscriptionId]: id },
+      }));
+    }
+  }
+
   stop() {
+    this.#closeAllSubscriptions();
     this.mrtr.clear();
     return this.legacy.stop();
   }

@@ -6,7 +6,9 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { UpliftBridge } from '../src/bridge.js';
-import { MODERN_VERSION, META, ERROR } from '../src/protocol.js';
+import {
+  MODERN_VERSION, META, ERROR, LISTEN_METHOD, SUBSCRIPTION_ACK, CANCELLED_NOTIFICATION,
+} from '../src/protocol.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/legacy-server.js', import.meta.url));
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -25,6 +27,22 @@ const modern = (method, params = {}) => ({
 });
 
 const firstInput = (res) => Object.entries(res.result.inputRequests)[0];
+
+/** Lets queued notification fan-out reach the sink before it is asserted on. */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * A bridge with its own upstream and a sink for everything written outside a
+ * response, which is where subscription traffic goes.
+ */
+const listening = async () => {
+  const sent = [];
+  const stream = new UpliftBridge({
+    command: process.execPath, args: [FIXTURE], onMessage: (msg) => sent.push(msg),
+  });
+  await stream.start();
+  return { stream, sent, stop: () => stream.stop() };
+};
 
 const runCli = async (args, input, env = process.env) => {
   const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -306,6 +324,122 @@ describe('mcp-uplift bridge', () => {
     const done = await bridge.handle(modern('tools/call', { name: 'two-round', arguments: {},
       requestState: second.result.requestState, inputResponses: { [secondKey]: { roots: [] } } }));
     assert.equal(done.result.content[0].text, 'two rounds complete');
+  });
+
+  test('acknowledges a subscription with only the types the server supports', async () => {
+    const { stream, sent, stop } = await listening();
+    const res = await stream.handle(modern(LISTEN_METHOD, { notifications: {
+      toolsListChanged: true, promptsListChanged: true, resourcesListChanged: true,
+    } }));
+    // The request stays open, so there is no response to write yet.
+    assert.equal(res, null);
+    const ack = sent[0];
+    assert.equal(ack.method, SUBSCRIPTION_ACK);
+    assert.equal(ack.params._meta[META.subscriptionId], id);
+    // The fixture declares listChanged for prompts and resources but not tools.
+    assert.deepEqual(ack.params.notifications,
+      { promptsListChanged: true, resourcesListChanged: true });
+    await stop();
+  });
+
+  test('delivers only subscribed notifications, stamped with the subscription id', async () => {
+    const { stream, sent, stop } = await listening();
+    await stream.handle(modern(LISTEN_METHOD, { notifications: { resourcesListChanged: true } }));
+    const subId = id;
+    sent.length = 0;
+    await stream.handle(modern('tools/call', { name: 'emit-updates', arguments: {} }));
+    await tick();
+    assert.deepEqual(sent.map((m) => m.method), ['notifications/resources/list_changed']);
+    assert.equal(sent[0].params._meta[META.subscriptionId], subId);
+    await stop();
+  });
+
+  test('registers resource URIs upstream and reports one the server refused', async () => {
+    const { stream, sent, stop } = await listening();
+    await stream.handle(modern(LISTEN_METHOD, { notifications: {
+      resourceSubscriptions: ['file:///watched', 'file:///refused'],
+    } }));
+    assert.deepEqual(sent[0].params.notifications, { resourceSubscriptions: ['file:///watched'] });
+    sent.length = 0;
+    await stream.handle(modern('tools/call', { name: 'emit-updates', arguments: {} }));
+    await tick();
+    assert.deepEqual(sent.map((m) => m.params.uri), ['file:///watched']);
+    await stop();
+  });
+
+  test('keeps a shared URI watched until its last subscription closes', async () => {
+    const { stream, sent, stop } = await listening();
+    const uri = 'file:///shared';
+    await stream.handle(modern(LISTEN_METHOD, { notifications: { resourceSubscriptions: [uri] } }));
+    const first = id;
+    await stream.handle(modern(LISTEN_METHOD, { notifications: { resourceSubscriptions: [uri] } }));
+    const second = id;
+
+    stream.handleNotification({ jsonrpc: '2.0', method: CANCELLED_NOTIFICATION,
+      params: { requestId: first } });
+    await tick();
+    let log = await stream.handle(modern('unsubscribe-log'));
+    assert.deepEqual(log.result.uris, [], 'the second subscription still needs the URI');
+
+    sent.length = 0;
+    await stream.handle(modern('tools/call', { name: 'emit-updates', arguments: {} }));
+    await tick();
+    assert.deepEqual(sent.map((m) => m.params._meta[META.subscriptionId]), [second]);
+
+    stream.handleNotification({ jsonrpc: '2.0', method: CANCELLED_NOTIFICATION,
+      params: { requestId: second } });
+    await tick();
+    log = await stream.handle(modern('unsubscribe-log'));
+    assert.deepEqual(log.result.uris, [uri]);
+    await stop();
+  });
+
+  test('answers open subscriptions on shutdown so a client sees a clean end', async () => {
+    const { stream, sent, stop } = await listening();
+    await stream.handle(modern(LISTEN_METHOD, { notifications: { resourcesListChanged: true } }));
+    const subId = id;
+    sent.length = 0;
+    await stop();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].id, subId);
+    assert.deepEqual(sent[0].result,
+      { resultType: 'complete', _meta: { [META.subscriptionId]: subId } });
+  });
+
+  test('rejects a malformed, duplicate, or oversized subscription', async () => {
+    const { stream, stop } = await listening();
+    const bad = await stream.handle(modern(LISTEN_METHOD, { notifications: { toolsListChanged: 'yes' } }));
+    assert.equal(bad.error.code, ERROR.INVALID_PARAMS);
+
+    const many = await stream.handle(modern(LISTEN_METHOD, { notifications: {
+      resourceSubscriptions: Array.from({ length: 300 }, (_, i) => `file:///${i}`),
+    } }));
+    assert.match(many.error.message, /Too many resource subscriptions/);
+
+    const open = modern(LISTEN_METHOD, { notifications: { resourcesListChanged: true } });
+    assert.equal(await stream.handle(open), null);
+    const duplicate = await stream.handle({ ...open });
+    assert.match(duplicate.error.message, /already in use/);
+    await stop();
+  });
+
+  test('CLI streams a subscription and closes it on shutdown', async () => {
+    const listen = JSON.stringify(modern(LISTEN_METHOD, { notifications: { resourcesListChanged: true } }));
+    const subId = id;
+    const emit = JSON.stringify(modern('tools/call', { name: 'emit-updates', arguments: {} }));
+    const { code, stdout } = await runCli([process.execPath, FIXTURE], `${listen}\n${emit}\n`);
+    const messages = stdout.trim().split('\n').map((line) => JSON.parse(line));
+
+    const ack = messages.find((m) => m.method === SUBSCRIPTION_ACK);
+    assert.equal(ack.params._meta[META.subscriptionId], subId);
+    const update = messages.find((m) => m.method === 'notifications/resources/list_changed');
+    assert.equal(update.params._meta[META.subscriptionId], subId);
+    // Unsubscribed types never reach the client.
+    assert.equal(messages.some((m) => m.method === 'notifications/prompts/list_changed'), false);
+    // The still-open request is answered last, on shutdown.
+    assert.equal(messages.at(-1).id, subId);
+    assert.equal(messages.at(-1).result.resultType, 'complete');
+    assert.equal(code, 0);
   });
 
   test('CLI returns parse and line-limit errors without launching upstream', async () => {

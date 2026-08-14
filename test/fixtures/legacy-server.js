@@ -11,6 +11,8 @@ let buf = '';
 let nextServerId = 1000;
 const write = (m) => process.stdout.write(JSON.stringify(m) + '\n');
 const pendingElicit = new Map();
+const subscribedUris = new Set();
+const unsubscribeLog = [];
 
 if (process.env.SPAWN_DESCENDANT_FILE) {
   const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
@@ -65,7 +67,13 @@ function handle(msg) {
       jsonrpc: '2.0', id,
       result: {
         protocolVersion: '2025-11-25',
-        capabilities: { tools: {}, logging: {} },
+        // tools has no listChanged, so that subscription field is unsupported
+        // and must be omitted from the acknowledged filter.
+        capabilities: {
+          tools: {}, logging: {},
+          prompts: { listChanged: true },
+          resources: { subscribe: true, listChanged: true },
+        },
         serverInfo: { name: 'legacy-demo', version: '1.2.3' },
         instructions: 'A legacy server.',
       },
@@ -75,6 +83,27 @@ function handle(msg) {
   if (method === 'notifications/initialized') return;
 
   if (method === 'ping') { write({ jsonrpc: '2.0', id, result: {} }); return; }
+
+  // Legacy resource subscription: updates only arrive for registered URIs.
+  if (method === 'resources/subscribe') {
+    if (params.uri === 'file:///refused') {
+      write({ jsonrpc: '2.0', id, error: { code: -32002, message: 'cannot watch' } });
+      return;
+    }
+    subscribedUris.add(params.uri);
+    write({ jsonrpc: '2.0', id, result: {} });
+    return;
+  }
+  if (method === 'resources/unsubscribe') {
+    unsubscribeLog.push(params.uri);
+    subscribedUris.delete(params.uri);
+    write({ jsonrpc: '2.0', id, result: {} });
+    return;
+  }
+  if (method === 'unsubscribe-log') {
+    write({ jsonrpc: '2.0', id, result: { uris: unsubscribeLog } });
+    return;
+  }
 
   if (method === 'tools/list') {
     write({
@@ -108,6 +137,17 @@ function handle(msg) {
       write({ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1, total: 1 } });
       write({ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info', data: 'done' } });
       write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'clean' }] } });
+      return;
+    }
+    if (params.name === 'emit-updates') {
+      // A legacy server pushes these unasked; only the bridge filters them.
+      for (const uri of subscribedUris) {
+        write({ jsonrpc: '2.0', method: 'notifications/resources/updated', params: { uri } });
+      }
+      write({ jsonrpc: '2.0', method: 'notifications/resources/list_changed', params: {} });
+      write({ jsonrpc: '2.0', method: 'notifications/prompts/list_changed', params: {} });
+      write({ jsonrpc: '2.0', method: 'notifications/tools/list_changed', params: {} });
+      write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'emitted' }] } });
       return;
     }
     if (params.name === 'resource-error') {

@@ -104,6 +104,8 @@ call.
 | Tools, prompts, and resources | Forwarded with modern result and cache metadata |
 | Legacy resource-not-found errors | Mapped from `-32002` to `-32602` |
 | Sampling, elicitation, and roots requests | Translated into multi-round-trip `input_required` results |
+| Legacy change notifications | Filtered onto a `subscriptions/listen` stream |
+| Legacy `resources/subscribe` | Called upstream on behalf of `resourceSubscriptions` |
 | Removed methods | Rejected with `-32601` method-not-found |
 | Upstream failures | Returned as `-32603` internal errors |
 
@@ -150,6 +152,57 @@ The resumed request must match the original, every key must be answered, and
 `requestState` is single-use and expires, so an invalid resume is rejected
 rather than half-applied.
 
+## Receiving change notifications
+
+A legacy server pushes notifications at its client unprompted. `2026-07-28`
+instead has the client open a stream and name the types it wants, and forbids
+the server from sending anything else. The bridge keeps the legacy end
+permanently opted in and does that filtering itself.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "listen-1",
+  "method": "subscriptions/listen",
+  "params": {
+    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+               "io.modelcontextprotocol/clientCapabilities": {} },
+    "notifications": {
+      "toolsListChanged": true,
+      "resourceSubscriptions": ["file:///project/config.json"]
+    }
+  }
+}
+```
+
+The request stays open. Its JSON-RPC id **is** the subscription id, and it is
+answered only when the stream closes. The first message back is always the
+acknowledgement, whose filter reports the subset the wrapped server can
+actually deliver — a type the legacy server never declared is omitted rather
+than silently promised:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/subscriptions/acknowledged",
+  "params": {
+    "_meta": { "io.modelcontextprotocol/subscriptionId": "listen-1" },
+    "notifications": { "toolsListChanged": true }
+  }
+}
+```
+
+Every notification on the stream carries the same `subscriptionId`, which is
+how a client demultiplexes concurrent subscriptions sharing one stdio channel.
+`resourceSubscriptions` is registered upstream with the legacy
+`resources/subscribe` that `2026-07-28` removed, and URIs are reference counted,
+so two subscriptions watching one URI do not unsubscribe each other.
+
+Cancel with `notifications/cancelled` naming the listen request id. When the
+bridge itself closes a stream it answers the still-open request with an empty
+`complete` result, which is how a client tells a clean shutdown from a dropped
+transport.
+
 ## Known limitations
 
 Real-world validation confirmed discovery and tool listing against 39 distinct
@@ -163,12 +216,12 @@ be translated.
   or `roots/list` request back to the call that caused it, so the bridge
   keeps one call in flight through all of its MRTR rounds. This favors correct
   attribution over throughput.
-- **Legacy notifications have no home and are dropped.** `2026-07-28` moved
-  streamed notifications onto a dedicated `subscriptions/listen` stream; this
-  bridge is a plain one-request-one-response stdio proxy and does not
-  implement that stream, so `notifications/progress` and
-  `notifications/message` from the wrapped server are discarded rather than
-  delivered.
+- **Progress and logging notifications are still dropped.** A
+  `subscriptions/listen` stream carries change notifications only. Progress and
+  logging belong to an in-flight request rather than to a stream, and the
+  stateless request/response shape has nowhere to put them, so
+  `notifications/progress` and `notifications/message` from the wrapped server
+  are discarded.
 - Real-server checks require downloads and remain outside the offline suite.
 - The kill switch terminates the launched process tree on POSIX and Windows,
   but trusted code can deliberately daemonize into a new OS process session.
