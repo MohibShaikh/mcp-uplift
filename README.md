@@ -23,6 +23,42 @@ acknowledgement through `resources/list_changed` to graceful closure.
 Every command shown in the clip was first executed in a clean npm sandbox
 against the registry release displayed onscreen.
 
+## When you need this
+
+The official SDKs already handle the migration for servers whose maintainers
+will ship an update. This is for the ones that will not:
+
+- **Servers nobody maintains any more.** A server that works and has not been
+  touched in a year is not going to be ported, and it stops working the day its
+  client goes modern-only.
+- **Servers you cannot rebuild.** Vendor binaries, internal tools whose author
+  left, anything shipped without source.
+- **Servers outside the tier-1 SDKs.** The migration story is good in
+  TypeScript and Python and thinner everywhere else.
+- **Servers you do not want to fork.** Wrapping is reversible; a fork is a
+  maintenance burden you own forever.
+
+`mcp-uplift` buys time for all of these. Point your client at the bridge
+instead of the server and nothing about the server changes.
+
+## Verified against real servers
+
+Every claim here is reproducible with the drivers in `test/`.
+
+| | |
+| --- | --- |
+| Published servers in the probe list | 97 (10 reference, 87 community) |
+| Probed in the last subscription sweep | 49 |
+| Protocol failures | **0** |
+| Full `subscriptions/listen` lifecycles | 11 |
+| Offline test suite | 39 tests, Linux/macOS/Windows |
+
+The community half matters more than the reference half. Those servers were
+hand-rolled against the 2025 spec by people who read it once, which is exactly
+where a translation bug hides — and each was checked against the npm registry
+for an executable, a pre-v2 SDK dependency, and a publish date before the
+cutoff, so every one is a genuine legacy server.
+
 ## Usage
 
 Run without installing:
