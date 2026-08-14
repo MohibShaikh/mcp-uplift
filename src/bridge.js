@@ -6,8 +6,12 @@ import {
   DEFAULT_TTL_MS, LIMITS, LISTEN_METHOD, SUBSCRIPTION_ACK, CANCELLED_NOTIFICATION,
 } from './protocol.js';
 import { isDeepStrictEqual } from 'node:util';
+import { createRequire } from 'node:module';
 
-const BRIDGE_INFO = { name: 'mcp-uplift', version: '0.1.0' };
+const BRIDGE_INFO = {
+  name: 'mcp-uplift',
+  version: createRequire(import.meta.url)('../package.json').version,
+};
 
 /**
  * Presents a legacy MCP server as a modern (2026-07-28) stateless server.

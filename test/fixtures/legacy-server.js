@@ -75,7 +75,7 @@ function handle(msg) {
           resources: { subscribe: true, listChanged: true },
         },
         serverInfo: { name: 'legacy-demo', version: '1.2.3' },
-        instructions: 'A legacy server.',
+        instructions: `A legacy server initialized by ${params.clientInfo.name}@${params.clientInfo.version}.`,
       },
     });
     return;

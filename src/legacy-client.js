@@ -2,7 +2,10 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
+import { createRequire } from 'node:module';
 import { LEGACY_VERSIONS, SERVER_INITIATED, LIMITS } from './protocol.js';
+
+const PACKAGE_VERSION = createRequire(import.meta.url)('../package.json').version;
 
 /**
  * Talks to a legacy (handshake-based) MCP server over stdio, and hides the
@@ -87,7 +90,7 @@ export class LegacyClient extends EventEmitter {
       result = await this.request('initialize', {
         protocolVersion: LEGACY_VERSIONS[0],
         capabilities: { sampling: {}, elicitation: {}, roots: { listChanged: false } },
-        clientInfo: { name: 'mcp-uplift', version: '0.1.0' },
+        clientInfo: { name: 'mcp-uplift', version: PACKAGE_VERSION },
       }, { timeoutMs: this.initializeTimeoutMs });
     } catch (err) {
       await this.stop();

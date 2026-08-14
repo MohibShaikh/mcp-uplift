@@ -12,6 +12,7 @@ import {
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/legacy-server.js', import.meta.url));
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+const PACKAGE_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 let bridge;
 let id = 0;
@@ -68,7 +69,9 @@ describe('mcp-uplift bridge', () => {
     assert.deepEqual(res.result.supportedVersions, [MODERN_VERSION]);
     assert.equal(res.result.ttlMs, 0);
     assert.equal(res.result.cacheScope, 'private');
+    assert.equal(res.result._meta[META.serverInfo].version, PACKAGE_VERSION);
     assert.equal(res.result._meta[META.serverInfo].upstream.name, 'legacy-demo');
+    assert.equal(res.result.instructions, `A legacy server initialized by mcp-uplift@${PACKAGE_VERSION}.`);
     assert.equal(res.result.serverInfo, undefined);
     // Logging was deprecated, so the bridge stops advertising it.
     assert.equal(res.result.capabilities.logging, undefined);
