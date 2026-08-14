@@ -47,25 +47,36 @@ Every claim here is reproducible with the drivers in `test/`.
 
 | | |
 | --- | --- |
-| Published servers in the probe list | 97 (10 reference, 87 community) |
-| Probed in the last subscription sweep | **97** |
-| Protocol failures | **0** |
+| Selected for the sweep | 97 (10 reference, 87 community) |
+| **Reached discovery** | **62** |
+| **Protocol failures** | **0** |
 | Full `subscriptions/listen` lifecycles | 26 |
 | Declared no `list_changed` capability | 36 |
-| Unavailable before protocol checks | 35 |
+| Never reached discovery | 35 |
 | Offline test suite | 39 tests, Linux/macOS/Windows |
 
-The full 97-package sweep completed on a clean GitHub runner on 2026-08-14
+The sweep ran on a clean GitHub runner on 2026-08-14
 ([run 31808932706](https://github.com/MohibShaikh/mcp-uplift/actions/runs/31808932706)).
-`UNAVAILABLE` means a package could not reach discovery, commonly because it
-needs credentials or is no longer runnable; it is not counted as a bridge
-failure.
 
-The community half matters more than the reference half. Those servers were
-hand-rolled against the 2025 spec by people who read it once, which is exactly
-where a translation bug hides — and each was checked against the npm registry
-for an executable, a pre-v2 SDK dependency, and a publish date before the
-cutoff, so every one is a genuine legacy server.
+The number that means something is **62, not 97**. Thirty-five packages never
+reached discovery at all — they need credentials, or are no longer runnable —
+so the bridge was never exercised against them and they prove nothing either
+way. Of the 62 that did respond, every one was carried through the protocol
+checks without a single failure: 26 completed a full subscription lifecycle and
+36 correctly reported that they declare no `list_changed` capability.
+
+Community servers matter more here than reference ones. They were hand-rolled
+against the 2025 spec by people who read it once, which is exactly where a
+translation bug hides — and each was checked against the npm registry for an
+executable, a pre-v2 SDK dependency, and a publish date before the cutoff, so
+every one is a genuine legacy server.
+
+Separately, discovery and tool listing were confirmed against 39 distinct legacy
+packages, and the official filesystem server completed a real `roots/list` MRTR
+round trip and returned all 14 tools.
+
+These are tested examples, not a guarantee that every server or
+session-dependent behaviour can be translated.
 
 ## Usage
 
@@ -268,29 +279,58 @@ a clean shutdown from a dropped transport.
 
 ## Known limitations
 
-Real-world validation confirmed discovery and tool listing against 39 distinct
-legacy MCP packages. The official filesystem server also completed a real
-`roots/list` MRTR round trip and returned all 14 tools. A separate subscription
-sweep probed 49 published packages with no protocol failures, 11 of which
-completed the full `subscriptions/listen` lifecycle. These are tested examples,
-not a guarantee that every server or session-dependent behavior can be
-translated.
+The stale-numbers paragraph that used to open this section now lives in
+[Verified against real servers](#verified-against-real-servers). What follows is
+what the bridge cannot do, and why.
 
-- **All legacy calls are serialized.** The
-  legacy protocol never links a `sampling/createMessage`, `elicitation/create`,
-  or `roots/list` request back to the call that caused it, so the bridge
-  keeps one call in flight through all of its MRTR rounds. This favors correct
-  attribution over throughput.
-- **Progress and logging notifications are still dropped.** A
-  `subscriptions/listen` stream carries change notifications only. Progress and
-  logging belong to an in-flight request rather than to a stream, and the
-  stateless request/response shape has nowhere to put them, so
-  `notifications/progress` and `notifications/message` from the wrapped server
-  are discarded.
-- Real-server checks require downloads and remain outside the offline suite.
-- The kill switch terminates the launched process tree on POSIX and Windows,
-  but trusted code can deliberately daemonize into a new OS process session.
-  Use an OS sandbox or container when stronger confinement is required.
+### The shape of the design
+
+- **Every forwarded call is serialized.** A legacy server can interrupt any call
+  to ask the client something, and the legacy protocol never links that question
+  back to the call that caused it. The bridge therefore keeps one call in flight
+  upstream and holds it through all of its MRTR rounds. Requests are accepted
+  concurrently up to `--max-in-flight`, but they execute one at a time: a call
+  parked awaiting client input blocks unrelated calls until it is answered,
+  cancelled, or expires. This favours correct attribution over throughput.
+- **The bridge is stateful; only its interface is stateless.** Parked MRTR calls
+  live in memory, because each one is a promise waiting on the wrapped server's
+  own in-flight call. Restart the bridge and they are gone — the child process
+  that was waiting died with it. A `requestState` from before a restart is
+  rejected with `restarted: true` in the error data so a client can tell that
+  apart from a bad token, but the call itself must be reissued.
+- **One warm session serves every request.** The legacy handshake runs once and
+  the session is shared, so any state the wrapped server keeps is shared too.
+  For a memory or session-scoped server that means one store, not one per
+  request. Each client launches its own `mcp-uplift` process over its own stdio
+  pipe, so this is sharing within a client, not between them.
+- **The wrapped server is told roots will never change.** `2026-07-28` removed
+  `notifications/roots/list_changed`, so a modern client has no way to report a
+  change and the bridge advertises `roots.listChanged: false` upstream. That is
+  accurate rather than convenient: a server that would have adapted to a roots
+  change cannot be told about one.
+
+### What gets dropped or capped
+
+- **Progress and logging notifications are dropped.** A `subscriptions/listen`
+  stream carries change notifications only. Progress and logging belong to an
+  in-flight request rather than to a stream, and the stateless request/response
+  shape has nowhere to put them.
+- **Unparseable stdout lines are skipped silently.** Legacy servers print
+  banners on stdout, so a line that is not JSON is ignored rather than treated as
+  an error. A genuinely malformed JSON-RPC message is indistinguishable from a
+  banner and disappears the same way.
+- **Exceeding a size cap ends the session, not the message.** A line over
+  `--max-line-bytes` or a buffer over `--max-buffer-bytes` stops the wrapped
+  server rather than dropping the one oversized message.
+- **Hard ceilings, all tunable.** 120 s per upstream request, 16 concurrent
+  subscriptions, 256 URIs per subscription. A legitimately long-running tool
+  call becomes a timeout error; raise `--request-timeout-ms` for it.
+- **The kill switch can be escaped.** It terminates the launched process tree on
+  POSIX and Windows, but trusted code can deliberately daemonize into a new OS
+  process session. Use an OS sandbox or container when stronger confinement is
+  required.
+
+Real-server checks require downloads and stay outside the offline suite.
 
 ## Security reports
 

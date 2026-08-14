@@ -47,16 +47,63 @@ The README's "Known limitations" section is load-bearing. When a limitation
 narrows, rewrite it to match reality; do not delete it and do not overstate what
 was fixed.
 
+### Numbers must come from a run that happened
+
+The README's "Verified against real servers" table states counts. Every one of
+them must trace to a sweep that actually completed, and it separates three
+numbers that are easy to blur into one:
+
+- **Selected** — how many packages are in the list. Adding to the list proves
+  nothing on its own.
+- **Reached discovery** — how many actually responded. This is the denominator
+  for any claim about correctness.
+- **Never reached** — needed credentials or no longer run. These exercise
+  nothing and must never be counted as passes.
+
+"0 failures across 97" was wrong when only 62 responded; the honest claim is
+"0 failures across 62 reachable servers". Re-run the sweep, then write down
+what it returned.
+
 ## Layout
 
 - `src/protocol.js` — version constants, `_meta` keys, error codes, method sets
-- `src/legacy-client.js` — the child process and legacy JSON-RPC session
+- `src/legacy-client.js` — the child process and legacy JSON-RPC session, plus
+  `resolveLaunch`, which does the Windows executable resolution Node's `spawn`
+  does not
 - `src/mrtr.js` — parked calls awaiting client input (`input_required`)
 - `src/subscriptions.js` — open `subscriptions/listen` streams
 - `src/bridge.js` — request translation, the piece that ties the rest together
 - `src/cli.js` — stdio framing and process lifecycle
 
+There is no version module: `bridge.js` and `legacy-client.js` each read the
+installed `package.json` directly. A hardcoded version shipped a release that
+reported itself as `0.1.0`; do not reintroduce one.
+
 ## Commands
 
 - `npm test` — offline suite (`node --test test/*.test.js`)
-- `test/real-world-60.sh` — real published servers; needs network, not in `npm test`
+- `node test/real-world-subscriptions.mjs` — the current real-server driver. 97
+  published packages, `--only official|community`, `--bin` to drive an installed
+  binary instead of `src/cli.js`. Needs network, executes everything it
+  downloads, and is not in `npm test`.
+- `test/real-world-60*.sh` — the older discovery sweeps. Bash, and their cleanup
+  depends on `pkill`, which Git Bash on Windows does not have.
+
+`npm test` globs `test/*.test.js`. Node expands that itself from 22; before that
+it depends on the shell, so the suite cannot run on Windows under Node 20.
+
+## Releasing
+
+`npm version patch && git push --follow-tags` is the whole release.
+`.github/workflows/release.yml` fires on the tag, refuses to publish when the
+tag disagrees with `package.json`, and authenticates to npm with OIDC trusted
+publishing, so there is no token anywhere and no OTP prompt. It also cuts the
+GitHub Release.
+
+`npm version` writes an annotated tag, which is what `--follow-tags` pushes. A
+hand-written `git tag` is lightweight and will be left behind silently.
+
+Anything in `files` (`src`, `README.md`, `LICENSE`) only reaches npm through a
+release; a README correction needs a version bump to show up on the package
+page. Everything else — workflows, tests, `.gitignore` — never ships, so it
+needs no release at all.

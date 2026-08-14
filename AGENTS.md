@@ -68,6 +68,12 @@ The most common failure mode here is doing more than was asked. Guard against it
 - **Do not touch** `README.md`, `package.json`, `LICENSE`, git history, tags, or
   anything under `.git/` unless the task is explicitly about them. Never run
   `git push`, `npm publish`, or `npm version`.
+- **Pushing a `v*` tag publishes to npm.** `release.yml` turns a tag into a
+  released package, and a published version can never be reused. Do not create
+  or push tags.
+- **Editing `.github/workflows/release.yml` can break releasing.** Its filename
+  is registered with npm as a trusted publisher; renaming the file revokes
+  publishing until someone updates the npm settings by hand.
 
 If the task turns out to be underspecified, ask. Do not resolve ambiguity by
 building more.
@@ -78,24 +84,40 @@ building more.
 npm test          # offline suite, must be fully green
 ```
 
-`test/real-world-*.sh` hit real published servers over the network. They are
-deliberately excluded from `npm test`. Run them only when asked.
+The real-server drivers hit the network and **execute every package they
+download**, most written by strangers. They are excluded from `npm test` on
+purpose. Run them only when asked, and prefer the GitHub workflow
+(`real-world.yml`, which has `workflow_dispatch`) over a local machine.
+
+- `node test/real-world-subscriptions.mjs` — current driver, 97 packages.
+- `test/real-world-60*.sh` — older discovery sweeps; their cleanup calls
+  `pkill`, absent from Git Bash on Windows.
 
 Report results honestly. Paste the actual summary line. If something fails or
 you skipped part of the task, say which part and why. Never describe work as
 complete based on expectation rather than a command you ran.
+
+**Never state a count that a run did not produce.** The README separates how
+many packages are in the probe list from how many were actually probed. Adding
+packages to the list does not increase the probed count. If you want a bigger
+number, run the sweep and report what came back.
 
 ## Layout
 
 | File | Responsibility |
 | --- | --- |
 | `src/protocol.js` | version constants, `_meta` keys, error codes, method sets |
-| `src/legacy-client.js` | the child process and the legacy JSON-RPC session |
+| `src/legacy-client.js` | the child process, the legacy JSON-RPC session, and Windows executable resolution |
 | `src/mrtr.js` | parked calls awaiting client input (`input_required`) |
 | `src/subscriptions.js` | open `subscriptions/listen` streams |
 | `src/bridge.js` | request translation; ties the rest together |
 | `src/cli.js` | stdio framing and process lifecycle |
 | `test/fixtures/legacy-server.js` | a deliberately old-fashioned MCP server |
+| `.github/workflows/` | matrix CI, scheduled real-server sweep, tag-driven release |
+
+The version is read from the installed `package.json` in `bridge.js` and
+`legacy-client.js`. Never hardcode it — a hardcoded value shipped a release
+that reported itself as `0.1.0`.
 
 ## Concepts you will need
 
