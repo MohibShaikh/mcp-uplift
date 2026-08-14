@@ -48,10 +48,18 @@ Every claim here is reproducible with the drivers in `test/`.
 | | |
 | --- | --- |
 | Published servers in the probe list | 97 (10 reference, 87 community) |
-| Probed in the last subscription sweep | 49 |
+| Probed in the last subscription sweep | **97** |
 | Protocol failures | **0** |
-| Full `subscriptions/listen` lifecycles | 11 |
+| Full `subscriptions/listen` lifecycles | 26 |
+| Declared no `list_changed` capability | 36 |
+| Unavailable before protocol checks | 35 |
 | Offline test suite | 39 tests, Linux/macOS/Windows |
+
+The full 97-package sweep completed on a clean GitHub runner on 2026-08-14
+([run 31808932706](https://github.com/MohibShaikh/mcp-uplift/actions/runs/31808932706)).
+`UNAVAILABLE` means a package could not reach discovery, commonly because it
+needs credentials or is no longer runnable; it is not counted as a bridge
+failure.
 
 The community half matters more than the reference half. Those servers were
 hand-rolled against the 2025 spec by people who read it once, which is exactly
