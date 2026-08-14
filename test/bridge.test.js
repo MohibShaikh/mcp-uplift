@@ -329,6 +329,64 @@ describe('mcp-uplift bridge', () => {
     assert.equal(done.result.content[0].text, 'two rounds complete');
   });
 
+  test('tells a client its requestState predates a restart, not that it is bogus', async () => {
+    const first = new UpliftBridge({ command: process.execPath, args: [FIXTURE] });
+    let token;
+    try {
+      await first.start();
+      const parked = await first.handle(modern('tools/call', { name: 'deploy', arguments: {} }));
+      token = parked.result.requestState;
+    } finally {
+      await first.stop();
+    }
+
+    // A second bridge is what a restart looks like to the client: same command,
+    // no memory of the parked call.
+    const restarted = new UpliftBridge({ command: process.execPath, args: [FIXTURE] });
+    try {
+      await restarted.start();
+      const res = await restarted.handle(modern('tools/call', { name: 'deploy', arguments: {},
+        requestState: token, inputResponses: {} }));
+      assert.equal(res.error.code, ERROR.INVALID_PARAMS);
+      assert.match(res.error.message, /before the bridge restarted/);
+      assert.equal(res.error.data.restarted, true);
+
+      // A token that was never issued still reads as unknown, not as a restart.
+      const bogus = await restarted.handle(modern('tools/call', { name: 'deploy', arguments: {},
+        requestState: 'not-a-token', inputResponses: {} }));
+      assert.match(bogus.error.message, /Unknown or expired/);
+    } finally {
+      await restarted.stop();
+    }
+  });
+
+  test('a cancelled MRTR call frees the bridge instead of waiting out its TTL', async () => {
+    const { stream, stop } = await listening();
+    try {
+      const parked = modern('tools/call', { name: 'deploy', arguments: {} });
+      const first = await stream.handle(parked);
+      assert.equal(first.result.resultType, 'input_required');
+
+      stream.handleNotification({ jsonrpc: '2.0', method: CANCELLED_NOTIFICATION,
+        params: { requestId: parked.id } });
+      await tick();
+
+      // The parked state is gone, so its token can no longer be resumed.
+      const [key] = firstInput(first);
+      const resumed = await stream.handle(modern('tools/call', { name: 'deploy', arguments: {},
+        requestState: first.result.requestState,
+        inputResponses: { [key]: { action: 'accept', content: { env: 'prod' } } } }));
+      assert.equal(resumed.error.code, ERROR.INVALID_PARAMS);
+
+      // The real point: the next call runs now. Before cancellation released
+      // the lock, this sat behind the abandoned call until the TTL expired.
+      const after = await stream.handle(modern('tools/call', { name: 'echo', arguments: { text: 'free' } }));
+      assert.equal(after.result.content[0].text, 'free');
+    } finally {
+      await stop();
+    }
+  });
+
   test('acknowledges a subscription with only the types the server supports', async () => {
     const { stream, sent, stop } = await listening();
     const res = await stream.handle(modern(LISTEN_METHOD, { notifications: {

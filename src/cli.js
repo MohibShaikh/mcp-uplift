@@ -14,6 +14,7 @@ options:
   --max-buffer-bytes N          default ${LIMITS.maxBufferBytes}
   --max-in-flight N             default ${LIMITS.maxInFlight}
   --max-subscriptions N         default ${LIMITS.maxSubscriptions}
+  --max-subscription-uris N     default ${LIMITS.maxSubscriptionUris}
   --initialize-timeout-ms N     default ${LIMITS.initializeTimeoutMs}
   --request-timeout-ms N        default ${LIMITS.requestTimeoutMs}
   --mrtr-ttl-ms N               default 300000
@@ -45,6 +46,7 @@ const bridge = new UpliftBridge({
   maxBufferBytes: options.maxBufferBytes, initializeTimeoutMs: options.initializeTimeoutMs,
   requestTimeoutMs: options.requestTimeoutMs, shutdownGraceMs: options.shutdownGraceMs,
   maxSubscriptions: options.maxSubscriptions,
+  maxSubscriptionUris: options.maxSubscriptionUris,
   onStderr: (data) => process.stderr.write(data),
   // Subscription traffic is not the answer to the request being handled, so it
   // is written as it happens rather than returned.
@@ -126,6 +128,7 @@ function parseArgs(argv) {
   const numeric = new Map([
     ['--max-line-bytes', 'maxLineBytes'], ['--max-buffer-bytes', 'maxBufferBytes'],
     ['--max-in-flight', 'maxInFlight'], ['--max-subscriptions', 'maxSubscriptions'],
+    ['--max-subscription-uris', 'maxSubscriptionUris'],
     ['--initialize-timeout-ms', 'initializeTimeoutMs'],
     ['--request-timeout-ms', 'requestTimeoutMs'], ['--mrtr-ttl-ms', 'mrtrTtlMs'],
     ['--shutdown-grace-ms', 'shutdownGraceMs'],

@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
+/** `<epoch>.<id>`, both UUIDs. */
+const TOKEN = /^[0-9a-f-]{36}\.[0-9a-f-]{36}$/i;
+
 /**
  * Multi Round-Trip Requests (SEP-2322).
  *
@@ -13,9 +16,22 @@ import { randomUUID } from 'node:crypto';
  */
 export class MrtrStore {
   #parked = new Map();
+  /**
+   * Stamped into every token so a token from a previous run is recognisable.
+   * Parked calls cannot outlive the process — each one is a promise waiting on
+   * a child that died with it — so a restart necessarily loses them. What it
+   * need not lose is the explanation: without this, a client that did nothing
+   * wrong gets the same "unknown or expired" answer as one sending a typo.
+   */
+  #epoch = randomUUID();
 
   constructor({ ttlMs = 300_000 } = {}) {
     this.ttlMs = ttlMs;
+  }
+
+  /** True when a token is well-formed but was issued before a restart. */
+  isFromPreviousRun(token) {
+    return typeof token === 'string' && TOKEN.test(token) && !token.startsWith(`${this.#epoch}.`);
   }
 
   /**
@@ -25,9 +41,9 @@ export class MrtrStore {
    * @param {Map}   p.legacyIds       inputRequest id -> legacy JSON-RPC id
    * @param {Promise} p.settle        the original in-flight legacy request
    */
-  park({ inputRequests, legacyIds, settle, cancel, method, params, release }) {
+  park({ inputRequests, legacyIds, settle, cancel, method, params, release, requestId }) {
     this.sweep();
-    const token = randomUUID();
+    const token = `${this.#epoch}.${randomUUID()}`;
     const entry = {
       inputRequests,
       legacyIds,
@@ -36,6 +52,9 @@ export class MrtrStore {
       method,
       params,
       release,
+      // Clients cancel by JSON-RPC request id, but parked calls are keyed by
+      // an opaque token, so the id has to be remembered to find the entry again.
+      requestId,
       expiresAt: Date.now() + this.ttlMs,
     };
     entry.timer = setTimeout(() => this.#expire(token, entry), this.ttlMs);
@@ -65,6 +84,21 @@ export class MrtrStore {
   sweep() {
     const now = Date.now();
     for (const [k, v] of this.#parked) if (v.expiresAt < now) this.#expire(k, v);
+  }
+
+  /**
+   * Drops the call a client cancelled. Without this a cancelled call keeps its
+   * upstream question open and holds the serialization lock until its TTL,
+   * which stalls every later call for as long as five minutes.
+   * @returns {boolean} whether a parked call was found and released
+   */
+  cancelByRequestId(requestId, reason = 'cancelled by client') {
+    for (const [token, entry] of this.#parked) {
+      if (entry.requestId !== requestId) continue;
+      this.#expire(token, entry, reason);
+      return true;
+    }
+    return false;
   }
 
   clear(reason = 'bridge stopped') {

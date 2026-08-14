@@ -177,32 +177,23 @@ export class UpliftBridge {
   }
 
   /**
-   * Registers URIs upstream. Serialized against calls that can ask the client
-   * questions, but only for the duration of these calls: a subscription outlives
-   * any single request, and holding the lock for its lifetime would stall the
-   * bridge. Returns the URIs the legacy server accepted.
+   * Registers URIs upstream, returning the ones the legacy server accepted.
+   *
+   * Deliberately does not take the serialization lock. That lock exists to keep
+   * one call in flight on the *server-initiated request* channel; these are
+   * ordinary request/response calls matched by JSON-RPC id, which cannot be
+   * confused with anyone else's. Taking it would make opening a stream wait
+   * behind a parked MRTR call — up to its full TTL — for no attribution gain.
    */
   async #subscribeUpstream(uris) {
     const accepted = new Set();
-    if (!uris.length) return accepted;
-    const release = await this.#acquire();
-    try {
-      for (const uri of uris) {
-        try {
-          await this.legacy.request('resources/subscribe', { uri });
-          accepted.add(uri);
-        } catch {
-          // A refused URI is reported by omission from the acknowledged filter.
-        }
+    for (const uri of uris) {
+      try {
+        await this.legacy.request('resources/subscribe', { uri });
+        accepted.add(uri);
+      } catch {
+        // A refused URI is reported by omission from the acknowledged filter.
       }
-    } finally {
-      // Nothing here can be answered through MRTR, so a server that asks
-      // anyway is told no rather than left waiting on a dead request.
-      for (const msg of this.pendingServerRequests) {
-        this.legacy.rejectServer(msg.id, 'cannot request input while opening a subscription');
-      }
-      this.pendingServerRequests = [];
-      release();
     }
     return accepted;
   }
@@ -220,9 +211,16 @@ export class UpliftBridge {
   handleNotification(msg) {
     if (msg?.method !== CANCELLED_NOTIFICATION) return;
     const id = msg.params?.requestId;
-    if (id === undefined || !this.subscriptions.has(id)) return;
-    // A cancelled request gets no response, so the stream just goes quiet.
-    void this.#closeSubscription(id, false);
+    if (id === undefined) return;
+    // A cancelled request gets no response either way, so both of these just
+    // go quiet. The id names a stream or a parked call, never both.
+    if (this.subscriptions.has(id)) {
+      void this.#closeSubscription(id, false);
+      return;
+    }
+    // Releases the upstream question and the serialization lock now, rather
+    // than leaving the next caller to wait out the TTL of a call nobody wants.
+    this.mrtr.cancelByRequestId(id);
   }
 
   /**
@@ -266,6 +264,14 @@ export class UpliftBridge {
   async #resume(id, req) {
     const entry = this.mrtr.get(req.params.requestState);
     if (!entry) {
+      // A parked call cannot survive a restart: it is a promise waiting on a
+      // child process that died too. Say so, rather than let a client that did
+      // nothing wrong read the same message as one sending a bad token.
+      if (this.mrtr.isFromPreviousRun(req.params.requestState)) {
+        return this.#error(id, ERROR.INVALID_PARAMS,
+          'requestState was issued before the bridge restarted; send the original request again',
+          { restarted: true });
+      }
       return this.#error(id, ERROR.INVALID_PARAMS, 'Unknown or expired requestState');
     }
 
@@ -323,7 +329,7 @@ export class UpliftBridge {
       const inputRequests = Object.fromEntries(outcome.msgs.map((m) => [`ir_${m.id}`, toInputRequest(m)]));
       const legacyIds = new Map(outcome.msgs.map((m) => [`ir_${m.id}`, m.id]));
       const token = this.mrtr.park({ inputRequests, legacyIds, settle: call,
-        method, params, release,
+        method, params, release, requestId: id,
         cancel: (reason) => {
           for (const legacyId of legacyIds.values()) this.legacy.rejectServer(legacyId, reason);
           release();
