@@ -1,5 +1,9 @@
 node_modules/
 
+# real-server verification output and anything the probed servers leave behind
+*-results.txt
+mydatabase.db
+
 # local-only planning docs
 COMPATIBILITY.md
 DECISIONS.md
