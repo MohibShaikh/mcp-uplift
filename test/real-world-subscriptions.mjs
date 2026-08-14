@@ -100,10 +100,9 @@ function parseArgs(argv) {
 
 /** Runs one package through the bridge and reports what the stream did. */
 async function probe(pkg, timeoutMs) {
-  // Windows needs the real filename: Node's spawn does not apply PATHEXT, so
-  // a bare "npx" is ENOENT there.
-  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const child = spawn(process.execPath, [CLI, npx, '-y', pkg], {
+  // A bare "npx" is correct on every platform: the bridge resolves the Windows
+  // shim itself, which is exactly what this is exercising.
+  const child = spawn(process.execPath, [CLI, 'npx', '-y', pkg], {
     stdio: ['pipe', 'pipe', 'ignore'],
   });
 

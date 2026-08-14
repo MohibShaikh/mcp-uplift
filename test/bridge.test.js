@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { UpliftBridge } from '../src/bridge.js';
@@ -441,6 +441,43 @@ describe('mcp-uplift bridge', () => {
     assert.equal(messages.at(-1).result.resultType, 'complete');
     assert.equal(code, 0);
   });
+
+  test('launches a server behind a Windows .cmd shim',
+    { skip: process.platform !== 'win32' }, async () => {
+      // Node cannot spawn a .cmd directly, and nearly every published MCP
+      // server is launched through one, so the bridge routes it via cmd.exe.
+      const dir = mkdtempSync(join(tmpdir(), 'mcp-uplift-cmd-'));
+      const shim = join(dir, 'legacy-shim.cmd');
+      writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
+      const shimmed = new UpliftBridge({ command: shim, args: [] });
+      try {
+        await shimmed.start();
+        const res = await shimmed.handle(modern('server/discover'));
+        assert.equal(res.result._meta[META.serverInfo].upstream.name, 'legacy-demo');
+      } finally {
+        await shimmed.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+  test('does not let an argument break out of the Windows command line',
+    { skip: process.platform !== 'win32' }, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mcp-uplift-inject-'));
+      const shim = join(dir, 'echo-arg.cmd');
+      const marker = join(dir, 'INJECTED');
+      // If the argument were pasted in unescaped, cmd would run the second
+      // command and create the marker file.
+      writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${FIXTURE}" %*\r\n`);
+      const hostile = `x& echo pwned > "${marker}"`;
+      const attacked = new UpliftBridge({ command: shim, args: [hostile] });
+      try {
+        await attacked.start();
+        assert.equal(existsSync(marker), false, 'argument escaped into a second command');
+      } finally {
+        await attacked.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
 
   test('CLI returns parse and line-limit errors without launching upstream', async () => {
     const parsed = await runCli([process.execPath, FIXTURE], '{nope}\n');
