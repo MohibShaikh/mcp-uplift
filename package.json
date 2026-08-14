@@ -22,10 +22,19 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "proxy",
+    "2026-07-28",
     "bridge",
     "compatibility",
-    "2026-07-28"
+    "legacy",
+    "stdio",
+    "elicitation",
+    "sampling",
+    "roots",
+    "input-required",
+    "mrtr",
+    "multi-round-trip",
+    "server-discover",
+    "proxy"
   ],
   "engines": {
     "node": ">=20"
