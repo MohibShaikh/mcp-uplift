@@ -1,6 +1,6 @@
 {
   "name": "mcp-uplift",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Experimental bridge for running trusted legacy MCP stdio servers behind the 2026-07-28 protocol.",
   "type": "module",
   "bin": {
