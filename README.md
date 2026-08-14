@@ -21,7 +21,7 @@ tools. The second half shows a live `subscriptions/listen` stream from
 acknowledgement through `resources/list_changed` to graceful closure.
 
 Every command shown in the clip was first executed in a clean npm sandbox
-against the packed release artifact displayed onscreen.
+against the registry release displayed onscreen.
 
 ## Usage
 
