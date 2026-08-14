@@ -23,7 +23,7 @@
  *   node test/real-world-subscriptions.mjs [options] [package...]
  *
  *     --timeout 90              seconds per package
- *     --only official|community which half of the list to run
+ *     --only reachable|candidates which half of the list to run
  *     --bin mcp-uplift          drive an installed binary instead of src/cli.js,
  *                               so CI exercises the published package the way a
  *                               user actually invokes it
@@ -46,124 +46,116 @@ const ENVELOPE = { [META.version]: '2026-07-28', [META.caps]: {} };
 const LISTEN_ID = 'listen-probe';
 
 /**
- * Reference servers from the protocol authors and well-funded vendors. These
- * are the best-maintained implementations and the least representative ones.
+ * Servers that have reached discovery in a real sweep. These are the ones the
+ * bridge is actually exercised against: they answer `initialize` with nothing
+ * configured, so every protocol check downstream runs for real.
+ *
+ * Deliberately excludes servers that front a hosted service. A package that
+ * needs an API key never reaches discovery, proves nothing either way, and
+ * only inflates the list.
  */
-const OFFICIAL = [
+const REACHABLE = [
+  '@anaisbetts/mcp-youtube',
+  '@browsermcp/mcp',
+  '@cyanheads/git-mcp-server',
+  '@drawio/mcp',
+  '@mieubrisse/notion-mcp-server',
   '@modelcontextprotocol/server-everything',
   '@modelcontextprotocol/server-filesystem',
   '@modelcontextprotocol/server-memory',
   '@modelcontextprotocol/server-sequential-thinking',
-  '@upstash/context7-mcp',
-  '@playwright/mcp',
   '@notionhq/notion-mcp-server',
-  '@cyanheads/git-mcp-server',
-  'chrome-devtools-mcp',
-  'mcp-sqlite',
-];
-
-/**
- * Servers written by individuals and small teams, which is what most of the
- * ecosystem actually is. Every entry was checked against the npm registry for
- * a `bin`, a dependency on a pre-v2 `@modelcontextprotocol/sdk`, and a last
- * publish before 2026-07-28, so each one is a real legacy server the bridge
- * is supposed to be able to wrap.
- *
- * These are the interesting cases. A hand-rolled server that never quite
- * matched the reference implementation is exactly where a translation bug
- * shows up, and nobody else is testing against them.
- */
-const COMMUNITY = [
-  '@abhiz123/todoist-mcp-server',
-  '@anaisbetts/mcp-youtube',
-  '@browsermcp/mcp',
-  '@drawio/mcp',
-  '@leonardsellem/n8n-mcp-server',
-  '@mieubrisse/notion-mcp-server',
-  '@ohah/react-native-mcp-server',
+  '@playwright/mcp',
   '@theupsider/lsp-mcp',
-  '@zencoderai/slack-mcp-server',
+  '@upstash/context7-mcp',
   'advanced-websearch-mcp',
   'agent-browser-mcp-server',
-  'agent5ive-mcp',
-  'agentation-mcp',
-  'bitbucket-mcp',
   'bitget-mcp-server',
   'bugsnag-mcp-server',
+  'chrome-devtools-mcp',
   'cls-mcp-server',
   'codex-mcp-server',
   'containerization-assist-mcp',
-  'dapp-local-mcp',
-  'datadog-mcp-server',
   'duckduckgo-mcp-server',
-  'enhanced-postgres-mcp-server',
   'excalidraw-mcp',
-  'expo-mcp',
   'fetcher-mcp',
   'figma-mcp',
   'gezhe-mcp-server',
   'graphlit-mcp-server',
   'groq-compound-mcp-server',
-  'hlims-mcp',
   'hourei-mcp-server',
   'ifconfig-mcp',
   'joplin-mcp-server',
-  'jsonresume-mcp',
   'langsmith-mcp-server',
-  'learn-mcp',
-  'leda-tickets-mcp',
-  'linkup-mcp-server',
   'lsp-mcp-server',
-  'mayar-mcp',
-  'mcp-atlassian',
   'mcp-hello-world',
   'mcp-mermaid',
-  'mcp-rime',
   'mcp-server-docker',
   'mcp-server-linear',
   'mcp-server-sqlite',
-  'mcp-server-sqlite-npx',
-  'mcp-servers',
+  'mcp-sqlite',
   'merkl-mcp',
   'next-devtools-mcp',
   'ollama-mcp',
   'ollama-mcp-server',
   'openapi-mcp-server',
   'openrpc-mcp-server-updated',
-  'outline-mcp-server',
-  'playwright-mcp-server',
   'playwright-stealth-mcp-server',
   'puppeteer-mcp-server',
   'puppeteer-mcp-server-ws',
   'ref-mcp-cli',
   'ref-tools-mcp',
-  'rime-mcp',
   'search-mcp-server',
-  'serper-search-scrape-mcp-server',
   'sk-calculator-mcp-server',
   'skillsmp-mcp-server',
-  'slack-workspace-mcp-server',
-  'slite-mcp-server',
   'square-mcp-server',
-  'stepfun-mcp',
-  'storybook-mcp-server',
-  'supabase-mcp',
   'tailwindcss-mcp-server',
   'tdesign-mcp-server',
   'tea-color-to-vars-mcp-server',
   'terraform-mcp-server',
   'terry-mcp',
   'tokportal-mcp',
-  'user-postgresql-mcp',
   'valjs-mcp-alpha',
   'valjs-mcp-beta',
-  'workers-mcp',
-  'xmcp',
-  'youtube-data-mcp-server',
-  'zubeid-youtube-mcp-server',
 ];
 
-const PACKAGES = [...OFFICIAL, ...COMMUNITY];
+/**
+ * Registry-verified legacy servers not yet probed, weighted toward
+ * documentation and local computation because those tend to need no
+ * credentials. A sweep decides whether they belong in REACHABLE; until one
+ * runs, they are candidates and nothing more.
+ */
+const CANDIDATES = [
+  '@odgrim/mcp-datetime',
+  '@workos/mcp-docs-server',
+  '@circlesac/mcp-docs-server',
+  '@praveenc/mcp-docs-server',
+  'mcp-docs-server',
+  '@amp-labs/mcp-docs-server',
+  '@kimsungwhee/apple-docs-mcp',
+  'apple-doc-mcp-server',
+  '@fluttersdk/mcp',
+  '@ivotoby/openapi-mcp-server',
+  'openapi-dynamic-mcp',
+  'ast-grep-mcp',
+  '@cap-js/mcp-server',
+  '@mcpmarket/mcp-auto-install',
+  '@jpisnice/shadcn-ui-mcp-server',
+  '@components-kit/open-workbook-mcp-server',
+  'open-design-mcp',
+  'ag-mcp',
+  '@brna/mcp',
+  '@talkincode/topox-mcp',
+  'crawldex-mcp',
+  '@yinuo-ngm/mcp-server',
+  '@task-boards/mcp-server',
+  '@ehrocks/fe-mcp-server',
+  '@hubium/hubium-mcp',
+  'mcp-vision-server',
+  '@florentine-ai/mcp',
+];
+
+const PACKAGES = [...REACHABLE, ...CANDIDATES];
 
 function parseArgs(argv) {
   const packages = [];
@@ -180,14 +172,14 @@ function parseArgs(argv) {
       if (!bin) throw new Error('--bin needs a command');
     } else if (argv[i] === '--only') {
       only = argv[++i];
-      if (only !== 'official' && only !== 'community') {
-        throw new Error('--only takes official or community');
+      if (only !== 'reachable' && only !== 'candidates') {
+        throw new Error('--only takes reachable or candidates');
       }
     } else packages.push(argv[i]);
   }
   if (packages.length) return { packages, timeoutMs, bin };
-  if (only === 'official') return { packages: OFFICIAL, timeoutMs, bin };
-  if (only === 'community') return { packages: COMMUNITY, timeoutMs, bin };
+  if (only === 'reachable') return { packages: REACHABLE, timeoutMs, bin };
+  if (only === 'candidates') return { packages: CANDIDATES, timeoutMs, bin };
   return { packages: PACKAGES, timeoutMs, bin };
 }
 
