@@ -4,6 +4,9 @@ node_modules/
 *-results.txt
 mydatabase.db
 
+# npm pack output, used by CI to install the package as a user would
+*.tgz
+
 # local-only planning docs
 COMPATIBILITY.md
 DECISIONS.md

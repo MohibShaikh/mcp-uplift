@@ -13,12 +13,26 @@
  * Node rather than shell because the sibling .sh drivers depend on pkill,
  * which does not exist in Git Bash on Windows.
  *
- *   node test/real-world-subscriptions.mjs [--timeout 90] [package...]
+ * SECURITY: this downloads and executes every package it probes, most of them
+ * written by people you have never heard of. That is the point — the bridge
+ * exists to wrap other people's servers — but run it on a throwaway machine or
+ * an ephemeral CI runner, never on a workstation holding anything you care
+ * about. The same warning the README gives about wrapping a server applies
+ * here, multiplied by the size of the list.
+ *
+ *   node test/real-world-subscriptions.mjs [options] [package...]
+ *
+ *     --timeout 90              seconds per package
+ *     --only official|community which half of the list to run
+ *     --bin mcp-uplift          drive an installed binary instead of src/cli.js,
+ *                               so CI exercises the published package the way a
+ *                               user actually invokes it
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { writeFileSync } from 'node:fs';
+import { resolveLaunch } from '../src/legacy-client.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const REPORT = fileURLToPath(new URL('../subscriptions-results.txt', import.meta.url));
@@ -31,79 +45,173 @@ const META = {
 const ENVELOPE = { [META.version]: '2026-07-28', [META.caps]: {} };
 const LISTEN_ID = 'listen-probe';
 
-/** Established stdio MCP packages that predate 2026-07-28. */
-const PACKAGES = [
+/**
+ * Reference servers from the protocol authors and well-funded vendors. These
+ * are the best-maintained implementations and the least representative ones.
+ */
+const OFFICIAL = [
   '@modelcontextprotocol/server-everything',
   '@modelcontextprotocol/server-filesystem',
   '@modelcontextprotocol/server-memory',
   '@modelcontextprotocol/server-sequential-thinking',
-  '@modelcontextprotocol/server-puppeteer',
-  '@modelcontextprotocol/server-brave-search',
-  '@modelcontextprotocol/server-slack',
-  '@modelcontextprotocol/server-github',
-  '@modelcontextprotocol/server-postgres',
-  '@modelcontextprotocol/server-google-maps',
-  '@modelcontextprotocol/server-gdrive',
-  '@modelcontextprotocol/server-sentry',
-  '@modelcontextprotocol/server-redis',
-  '@modelcontextprotocol/server-gitlab',
-  '@modelcontextprotocol/server-aws-kb-retrieval',
   '@upstash/context7-mcp',
   '@playwright/mcp',
-  '@executeautomation/playwright-mcp-server',
-  '@browserbasehq/mcp-server-browserbase',
   '@notionhq/notion-mcp-server',
-  '@supabase/mcp-server-supabase',
-  '@wonderwhy-er/desktop-commander',
-  '@21st-dev/magic',
   '@cyanheads/git-mcp-server',
-  '@modelcontextprotocol/server-time',
-  'mcp-sqlite',
-  'sqlite-mcp-server',
   'chrome-devtools-mcp',
-  'server-perplexity-ask',
-  'mcp-server-fetch',
-  'mcp-server-git',
-  'mcp-server-time',
-  'mcp-server-memory',
-  'mcp-server-filesystem',
-  'slack-mcp-server',
-  'github-mcp-server',
-  'postgres-mcp',
-  'mongodb-mcp-server',
-  'redis-mcp-server',
-  'mysql-mcp-server',
-  'puppeteer-mcp-server',
-  'playwright-mcp',
-  'filesystem-mcp-server',
-  'fetch-mcp',
-  'git-mcp-server',
-  'youtube-mcp-server',
-  'google-maps-mcp-server',
-  'notion-mcp-server',
-  'linear-mcp-server',
-  'docker-mcp',
+  'mcp-sqlite',
 ];
+
+/**
+ * Servers written by individuals and small teams, which is what most of the
+ * ecosystem actually is. Every entry was checked against the npm registry for
+ * a `bin`, a dependency on a pre-v2 `@modelcontextprotocol/sdk`, and a last
+ * publish before 2026-07-28, so each one is a real legacy server the bridge
+ * is supposed to be able to wrap.
+ *
+ * These are the interesting cases. A hand-rolled server that never quite
+ * matched the reference implementation is exactly where a translation bug
+ * shows up, and nobody else is testing against them.
+ */
+const COMMUNITY = [
+  '@abhiz123/todoist-mcp-server',
+  '@anaisbetts/mcp-youtube',
+  '@browsermcp/mcp',
+  '@drawio/mcp',
+  '@leonardsellem/n8n-mcp-server',
+  '@mieubrisse/notion-mcp-server',
+  '@ohah/react-native-mcp-server',
+  '@theupsider/lsp-mcp',
+  '@zencoderai/slack-mcp-server',
+  'advanced-websearch-mcp',
+  'agent-browser-mcp-server',
+  'agent5ive-mcp',
+  'agentation-mcp',
+  'bitbucket-mcp',
+  'bitget-mcp-server',
+  'bugsnag-mcp-server',
+  'cls-mcp-server',
+  'codex-mcp-server',
+  'containerization-assist-mcp',
+  'dapp-local-mcp',
+  'datadog-mcp-server',
+  'duckduckgo-mcp-server',
+  'enhanced-postgres-mcp-server',
+  'excalidraw-mcp',
+  'expo-mcp',
+  'fetcher-mcp',
+  'figma-mcp',
+  'gezhe-mcp-server',
+  'graphlit-mcp-server',
+  'groq-compound-mcp-server',
+  'hlims-mcp',
+  'hourei-mcp-server',
+  'ifconfig-mcp',
+  'joplin-mcp-server',
+  'jsonresume-mcp',
+  'langsmith-mcp-server',
+  'learn-mcp',
+  'leda-tickets-mcp',
+  'linkup-mcp-server',
+  'lsp-mcp-server',
+  'mayar-mcp',
+  'mcp-atlassian',
+  'mcp-hello-world',
+  'mcp-mermaid',
+  'mcp-rime',
+  'mcp-server-docker',
+  'mcp-server-linear',
+  'mcp-server-sqlite',
+  'mcp-server-sqlite-npx',
+  'mcp-servers',
+  'merkl-mcp',
+  'next-devtools-mcp',
+  'ollama-mcp',
+  'ollama-mcp-server',
+  'openapi-mcp-server',
+  'openrpc-mcp-server-updated',
+  'outline-mcp-server',
+  'playwright-mcp-server',
+  'playwright-stealth-mcp-server',
+  'puppeteer-mcp-server',
+  'puppeteer-mcp-server-ws',
+  'ref-mcp-cli',
+  'ref-tools-mcp',
+  'rime-mcp',
+  'search-mcp-server',
+  'serper-search-scrape-mcp-server',
+  'sk-calculator-mcp-server',
+  'skillsmp-mcp-server',
+  'slack-workspace-mcp-server',
+  'slite-mcp-server',
+  'square-mcp-server',
+  'stepfun-mcp',
+  'storybook-mcp-server',
+  'supabase-mcp',
+  'tailwindcss-mcp-server',
+  'tdesign-mcp-server',
+  'tea-color-to-vars-mcp-server',
+  'terraform-mcp-server',
+  'terry-mcp',
+  'tokportal-mcp',
+  'user-postgresql-mcp',
+  'valjs-mcp-alpha',
+  'valjs-mcp-beta',
+  'workers-mcp',
+  'xmcp',
+  'youtube-data-mcp-server',
+  'zubeid-youtube-mcp-server',
+];
+
+const PACKAGES = [...OFFICIAL, ...COMMUNITY];
 
 function parseArgs(argv) {
   const packages = [];
   let timeoutMs = 90_000;
+  let only = null;
+  let bin = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--timeout') {
       const seconds = Number(argv[++i]);
       if (!Number.isFinite(seconds) || seconds < 1) throw new Error('--timeout needs seconds');
       timeoutMs = seconds * 1000;
+    } else if (argv[i] === '--bin') {
+      bin = argv[++i];
+      if (!bin) throw new Error('--bin needs a command');
+    } else if (argv[i] === '--only') {
+      only = argv[++i];
+      if (only !== 'official' && only !== 'community') {
+        throw new Error('--only takes official or community');
+      }
     } else packages.push(argv[i]);
   }
-  return { packages: packages.length ? packages : PACKAGES, timeoutMs };
+  if (packages.length) return { packages, timeoutMs, bin };
+  if (only === 'official') return { packages: OFFICIAL, timeoutMs, bin };
+  if (only === 'community') return { packages: COMMUNITY, timeoutMs, bin };
+  return { packages: PACKAGES, timeoutMs, bin };
 }
 
 /** Runs one package through the bridge and reports what the stream did. */
-async function probe(pkg, timeoutMs) {
+async function probe(pkg, timeoutMs, bin) {
   // A bare "npx" is correct on every platform: the bridge resolves the Windows
   // shim itself, which is exactly what this is exercising.
-  const child = spawn(process.execPath, [CLI, 'npx', '-y', pkg], {
+  //
+  // An installed `mcp-uplift` is itself a .cmd shim on Windows, so reaching it
+  // needs the same resolution the bridge does. Borrowing resolveLaunch here
+  // keeps the driver honest: it invokes the installed command rather than
+  // quietly falling back to a path only a developer would have.
+  // npx alone can take half a minute to start a server on a cold cache, and an
+  // installed shim adds another process layer on Windows, so the bridge's own
+  // 60s initialize default is raised to match the budget this probe was given.
+  const initializeMs = Math.max(60_000, timeoutMs - 20_000);
+  const flags = ['--initialize-timeout-ms', String(initializeMs), '--'];
+  const [command, args] = bin
+    ? [bin, [...flags, 'npx', '-y', pkg]]
+    : [process.execPath, [CLI, ...flags, 'npx', '-y', pkg]];
+  const launch = resolveLaunch(command, args);
+  const child = spawn(launch.command, launch.args, {
     stdio: ['pipe', 'pipe', 'ignore'],
+    windowsVerbatimArguments: launch.verbatim,
   });
 
   const messages = [];
@@ -199,13 +307,13 @@ async function probe(pkg, timeoutMs) {
   return outcome;
 }
 
-const { packages, timeoutMs } = parseArgs(process.argv.slice(2));
+const { packages, timeoutMs, bin } = parseArgs(process.argv.slice(2));
 const tally = { PASS: 0, FAIL: 0, UNSUPPORTED: 0, UNAVAILABLE: 0 };
 const lines = [`Probing ${packages.length} packages (timeout ${timeoutMs / 1000}s each)`];
 console.log(lines[0]);
 
 for (const pkg of packages) {
-  const { status, detail } = await probe(pkg, timeoutMs);
+  const { status, detail } = await probe(pkg, timeoutMs, bin);
   tally[status] = (tally[status] ?? 0) + 1;
   const line = `${status.padEnd(12)} ${pkg.padEnd(48)} ${detail}`;
   lines.push(line);

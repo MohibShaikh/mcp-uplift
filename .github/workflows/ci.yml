@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push should cancel the run for the commit it replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One broken platform should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22', '24']
+        include:
+          # `npm test` globs test/*.test.js. Node expands that itself from 22;
+          # before that it depends on the shell, so node 20 is only covered
+          # where a POSIX shell does the expanding.
+          - os: ubuntu-latest
+            node: '20'
+          - os: macos-latest
+            node: '20'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # No install step: the package has no dependencies and no lockfile, so
+      # `npm ci` would have nothing to do and would fail for want of one.
+      - run: npm test
+
+  installed:
+    # The suite drives the bridge in-process. This drives the packed tarball
+    # through the documented command instead, so the bin shim, the `files`
+    # list, and `npx <server>` resolution are all exercised the way a user
+    # meets them rather than the way the tests reach past them.
+    name: packed and installed / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Pack and install globally
+        shell: bash
+        run: npm install --global "$(npm pack --silent)"
+
+      # 240s per package: npx alone needs ~30s to start a server on a cold
+      # cache, and a Windows runner adds a shim layer on top of that.
+      - name: The command the README tells people to run
+        shell: bash
+        run: |
+          node test/real-world-subscriptions.mjs \
+            --bin mcp-uplift --timeout 240 \
+            @modelcontextprotocol/server-everything \
+            @modelcontextprotocol/server-filesystem
+
+      - name: Report
+        if: always()
+        shell: bash
+        run: cat subscriptions-results.txt || echo "no report written"

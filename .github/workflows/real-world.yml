@@ -1,0 +1,74 @@
+name: Real-world servers
+
+# Downloads and runs ~100 published MCP servers, most written by individuals.
+# That is deliberate — the bridge exists to wrap other people's servers — but it
+# only belongs on a throwaway machine, which is what a GitHub runner is. Never
+# wire this into a self-hosted runner.
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC. Upstream servers change on their own schedule, so the
+    # point is to hear about a break from CI rather than from a user.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Which half of the list to probe
+        type: choice
+        default: all
+        options: [all, official, community]
+      timeout:
+        description: Seconds allowed per package
+        default: '120'
+
+jobs:
+  probe:
+    name: probe published servers
+    runs-on: ubuntu-latest
+    # ~100 packages at up to 120s each, plus npm install time.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install the packed tarball, as a user would
+        shell: bash
+        run: npm install --global "$(npm pack --silent)"
+
+      - name: Probe
+        shell: bash
+        # Inputs go through the environment rather than into the script text,
+        # so a crafted dispatch value cannot become part of the command.
+        env:
+          ONLY: ${{ inputs.only || 'all' }}
+          SECONDS: ${{ inputs.timeout || '120' }}
+        run: |
+          args=(--bin mcp-uplift --timeout "$SECONDS")
+          if [ "$ONLY" != "all" ]; then args+=(--only "$ONLY"); fi
+          node test/real-world-subscriptions.mjs "${args[@]}"
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          if [ -f subscriptions-results.txt ]; then
+            {
+              echo '### Real-world subscription probe'
+              echo
+              echo '```'
+              tail -5 subscriptions-results.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No report written — the run died before finishing.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the full report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: subscription-results
+          path: subscriptions-results.txt
+          if-no-files-found: warn

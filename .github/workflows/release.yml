@@ -1,0 +1,73 @@
+name: Release
+
+# Pushing a version tag is the whole release. This publishes to npm and cuts
+# the GitHub Release from that same tag, so the two can never drift apart the
+# way they did when 0.2.0 sat on npm reporting itself as 0.1.0.
+#
+#   npm version patch && git push --follow-tags
+#
+# `npm version` writes an annotated tag, which is what --follow-tags pushes. A
+# hand-written `git tag` is lightweight and will not be pushed by that flag.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release
+  id-token: write   # mint the OIDC token npm trusts
+
+jobs:
+  release:
+    name: publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # release notes are generated from history
+
+      - uses: actions/setup-node@v4
+        with:
+          # Trusted publishing needs node >= 22.14.0.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Use an npm that understands trusted publishing
+        # The bundled npm is older than 11.5.1, which is the first version that
+        # exchanges the OIDC token for publish rights.
+        run: npm install --global npm@latest
+
+      - name: The tag must agree with package.json
+        # The failure this guards against already happened once: a released
+        # artifact that disagreed with the version it claimed.
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies $tag but package.json says $pkg"
+            exit 1
+          fi
+          echo "releasing $pkg"
+
+      - run: npm test
+
+      - name: Publish
+        # No NPM_TOKEN: npm detects the OIDC environment, authenticates with a
+        # short-lived token scoped to this workflow, and attaches provenance
+        # automatically. This also sidesteps the 2FA prompt that blocks
+        # publishing from a script with a classic token.
+        run: npm publish
+
+      - name: Cut the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Tolerate a release someone already created by hand for this tag,
+        # rather than failing after the publish has already succeeded.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release already exists, leaving its notes alone"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
