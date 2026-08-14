@@ -47,23 +47,22 @@ Every claim here is reproducible with the drivers in `test/`.
 
 | | |
 | --- | --- |
-| Selected for the sweep | 97 (10 reference, 87 community) |
-| **Reached discovery** | **62** |
+| Servers in the probe list | 79 |
+| **Reached discovery** | **79** |
 | **Protocol failures** | **0** |
-| Full `subscriptions/listen` lifecycles | 26 |
-| Declared no `list_changed` capability | 36 |
-| Never reached discovery | 35 |
-| Offline test suite | 39 tests, Linux/macOS/Windows |
+| Full `subscriptions/listen` lifecycles | 36 |
+| Declared no `list_changed` capability | 43 |
+| Offline test suite | 41 tests, Linux/macOS/Windows, Node 20/22/24 |
 
 The sweep ran on a clean GitHub runner on 2026-08-14
-([run 31808932706](https://github.com/MohibShaikh/mcp-uplift/actions/runs/31808932706)).
+([run 31826150110](https://github.com/MohibShaikh/mcp-uplift/actions/runs/31826150110)).
 
-The number that means something is **62, not 97**. Thirty-five packages never
-reached discovery at all — they need credentials, or are no longer runnable —
-so the bridge was never exercised against them and they prove nothing either
-way. Of the 62 that did respond, every one was carried through the protocol
-checks without a single failure: 26 completed a full subscription lifecycle and
-36 correctly reported that they declare no `list_changed` capability.
+The list holds only servers that answer `initialize` with nothing configured.
+Packages fronting a paid API were removed rather than counted: they stop at the
+missing key, exercise none of the bridge, and prove nothing either way. Every
+one of the 79 was carried through the full protocol check — 36 completed a
+subscription lifecycle end to end, and 43 correctly reported that they declare
+no `list_changed` capability.
 
 Community servers matter more here than reference ones. They were hand-rolled
 against the 2025 spec by people who read it once, which is exactly where a
@@ -188,7 +187,7 @@ Because a modern client cannot receive that push, the bridge returns an
       "params": { "message": "Which environment?" }
     }
   },
-  "requestState": "c0a2db7b-62bc-4420-b2e9-31da87f8f999"
+  "requestState": "9f1c0e7a-1d33-4b02-8a55-2b6f0c4d1e88.c0a2db7b-62bc-4420-b2e9-31da87f8f999"
 }
 ```
 
@@ -200,7 +199,7 @@ response body itself, not wrapped in `result`:
 {
   "name": "deploy",
   "arguments": {},
-  "requestState": "c0a2db7b-62bc-4420-b2e9-31da87f8f999",
+  "requestState": "9f1c0e7a-1d33-4b02-8a55-2b6f0c4d1e88.c0a2db7b-62bc-4420-b2e9-31da87f8f999",
   "inputResponses": {
     "ir_1000": { "action": "accept", "content": { "env": "prod" } }
   }

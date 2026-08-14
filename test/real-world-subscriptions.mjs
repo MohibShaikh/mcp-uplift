@@ -56,26 +56,43 @@ const LISTEN_ID = 'listen-probe';
  */
 const REACHABLE = [
   '@anaisbetts/mcp-youtube',
+  '@brna/mcp',
   '@browsermcp/mcp',
+  '@cap-js/mcp-server',
+  '@circlesac/mcp-docs-server',
+  '@components-kit/open-workbook-mcp-server',
   '@cyanheads/git-mcp-server',
   '@drawio/mcp',
+  '@ehrocks/fe-mcp-server',
+  '@fluttersdk/mcp',
+  '@jpisnice/shadcn-ui-mcp-server',
+  '@kimsungwhee/apple-docs-mcp',
   '@mieubrisse/notion-mcp-server',
   '@modelcontextprotocol/server-everything',
   '@modelcontextprotocol/server-filesystem',
   '@modelcontextprotocol/server-memory',
   '@modelcontextprotocol/server-sequential-thinking',
   '@notionhq/notion-mcp-server',
+  '@odgrim/mcp-datetime',
   '@playwright/mcp',
+  '@praveenc/mcp-docs-server',
+  '@task-boards/mcp-server',
   '@theupsider/lsp-mcp',
   '@upstash/context7-mcp',
+  '@workos/mcp-docs-server',
+  '@yinuo-ngm/mcp-server',
   'advanced-websearch-mcp',
+  'ag-mcp',
   'agent-browser-mcp-server',
+  'apple-doc-mcp-server',
+  'ast-grep-mcp',
   'bitget-mcp-server',
   'bugsnag-mcp-server',
   'chrome-devtools-mcp',
   'cls-mcp-server',
   'codex-mcp-server',
   'containerization-assist-mcp',
+  'crawldex-mcp',
   'duckduckgo-mcp-server',
   'excalidraw-mcp',
   'fetcher-mcp',
@@ -120,40 +137,11 @@ const REACHABLE = [
 ];
 
 /**
- * Registry-verified legacy servers not yet probed, weighted toward
- * documentation and local computation because those tend to need no
- * credentials. A sweep decides whether they belong in REACHABLE; until one
- * runs, they are candidates and nothing more.
+ * New servers awaiting their first sweep. Anything here is unproven: a sweep
+ * either promotes it into REACHABLE or shows it never answers, at which point
+ * it comes out of the list entirely rather than padding the count.
  */
-const CANDIDATES = [
-  '@odgrim/mcp-datetime',
-  '@workos/mcp-docs-server',
-  '@circlesac/mcp-docs-server',
-  '@praveenc/mcp-docs-server',
-  'mcp-docs-server',
-  '@amp-labs/mcp-docs-server',
-  '@kimsungwhee/apple-docs-mcp',
-  'apple-doc-mcp-server',
-  '@fluttersdk/mcp',
-  '@ivotoby/openapi-mcp-server',
-  'openapi-dynamic-mcp',
-  'ast-grep-mcp',
-  '@cap-js/mcp-server',
-  '@mcpmarket/mcp-auto-install',
-  '@jpisnice/shadcn-ui-mcp-server',
-  '@components-kit/open-workbook-mcp-server',
-  'open-design-mcp',
-  'ag-mcp',
-  '@brna/mcp',
-  '@talkincode/topox-mcp',
-  'crawldex-mcp',
-  '@yinuo-ngm/mcp-server',
-  '@task-boards/mcp-server',
-  '@ehrocks/fe-mcp-server',
-  '@hubium/hubium-mcp',
-  'mcp-vision-server',
-  '@florentine-ai/mcp',
-];
+const CANDIDATES = [];
 
 const PACKAGES = [...REACHABLE, ...CANDIDATES];
 
