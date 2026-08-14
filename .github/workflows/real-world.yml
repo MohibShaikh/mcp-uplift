@@ -28,8 +28,8 @@ jobs:
     # ~100 packages at up to 120s each, plus npm install time.
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload the full report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: subscription-results
           path: subscriptions-results.txt

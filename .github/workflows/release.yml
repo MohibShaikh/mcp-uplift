@@ -22,11 +22,11 @@ jobs:
     name: publish ${{ github.ref_name }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # release notes are generated from history
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           # Trusted publishing needs node >= 22.14.0.
           node-version: '24'
