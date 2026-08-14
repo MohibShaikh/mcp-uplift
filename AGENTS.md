@@ -97,10 +97,22 @@ Report results honestly. Paste the actual summary line. If something fails or
 you skipped part of the task, say which part and why. Never describe work as
 complete based on expectation rather than a command you ran.
 
-**Never state a count that a run did not produce.** The README separates how
-many packages are in the probe list from how many were actually probed. Adding
-packages to the list does not increase the probed count. If you want a bigger
-number, run the sweep and report what came back.
+**Never state a count that a run did not produce.** Adding packages to the probe
+list does not increase the probed count. If you want a bigger number, run the
+sweep and report what came back.
+
+**Adding servers to the probe list:** put them in `CANDIDATES`, never straight
+into `REACHABLE`. `REACHABLE` means a sweep proved the server answers
+`initialize` with nothing configured. After a run, promote what reached
+discovery and delete what did not — a package that stops at a missing API key
+exercises none of the bridge and only depresses the reachable figure.
+
+**Do not "fix" these — they are verified, deliberate behaviour:** every
+forwarded call is serialized (one lock, taken in `#forward`); the bridge
+advertises `roots.listChanged: false` upstream because `2026-07-28` deleted the
+notification that would report a change; one warm legacy session serves every
+request; parked MRTR calls cannot survive a restart; non-JSON stdout lines are
+skipped because legacy servers print banners. `CLAUDE.md` explains each.
 
 ## Layout
 

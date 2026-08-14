@@ -92,6 +92,47 @@ reported itself as `0.1.0`; do not reintroduce one.
 `npm test` globs `test/*.test.js`. Node expands that itself from 22; before that
 it depends on the shell, so the suite cannot run on Windows under Node 20.
 
+## Things that look like bugs and are not
+
+Each of these has been questioned and verified. Do not "fix" one without new
+evidence; if you think one is wrong, prove it the way it was proven here.
+
+- **Every forwarded call is serialized.** `#acquire()` has one call site, inside
+  `#forward`, so every request but discover/listen/removed/resume takes the
+  lock. That is deliberate: a legacy server can interrupt *any* call to ask the
+  client something, and the question carries no link back to its caller.
+  `--max-in-flight` bounds requests *accepted*, not executed — they queue.
+  Demonstrated by parking a call and watching an unrelated `echo` block.
+- **`roots.listChanged: false` is advertised upstream.** `2026-07-28` removed
+  `notifications/roots/list_changed` (it is in `REMOVED_METHODS`), so a modern
+  client has no way to report a change. Saying `true` would promise the wrapped
+  server something the bridge cannot deliver.
+- **One warm legacy session serves every request.** That is the design — the
+  handshake runs once. Each client launches its own bridge process over its own
+  stdio pipe, so this is sharing within a client, not across clients.
+- **Parked MRTR calls do not survive a restart.** Each is a promise waiting on a
+  child process that dies with the bridge; persisting the token would not
+  resurrect the server's in-flight call. The token carries the run that issued
+  it only so a stale one can be *explained*, not recovered.
+- **Non-JSON stdout lines are skipped silently.** Legacy servers print banners.
+  A malformed JSON-RPC line is indistinguishable from one, and treating either
+  as fatal would break working servers.
+
+## Maintaining the probe list
+
+`test/real-world-subscriptions.mjs` holds two arrays and a rule:
+
+- **`REACHABLE`** — servers a sweep proved answer `initialize` with nothing
+  configured. Only a completed run may add to this.
+- **`CANDIDATES`** — new, unproven servers. Add here, never straight to
+  `REACHABLE`.
+
+Run the sweep (`real-world.yml`, `--only candidates`), then promote what
+reached discovery and **delete** what did not. A package that stops at a missing
+API key exercises none of the bridge; keeping it only inflates the list and
+depresses the reachable figure. The list is a set of useful servers, not a
+headcount — 79 real ones beat 100 with a fifth unreachable.
+
 ## Releasing
 
 `npm version patch && git push --follow-tags` is the whole release.
