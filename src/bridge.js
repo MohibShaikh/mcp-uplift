@@ -16,6 +16,13 @@ const BRIDGE_INFO = {
 /**
  * Presents a legacy MCP server as a modern (2026-07-28) stateless server.
  *
+ * Assumes one client. The stateless protocol is the interface, not the
+ * implementation: one warm legacy session serves every request, a parked MRTR
+ * call is resumed on possession of its requestState with no principal bound to
+ * it, and subscriptions are keyed on the client-chosen request id. Over stdio
+ * that is safe because one process serves one pipe. Behind a shared transport
+ * it is not, and partitioning by principal would have to be added around it.
+ *
  * Responsibilities:
  *  - synthesize server/discover from the legacy initialize result
  *  - enforce per-request protocol version negotiation

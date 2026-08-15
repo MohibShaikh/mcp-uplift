@@ -297,11 +297,22 @@ what the bridge cannot do, and why.
   that was waiting died with it. A `requestState` from before a restart is
   rejected with `restarted: true` in the error data so a client can tell that
   apart from a bad token, but the call itself must be reissued.
-- **One warm session serves every request.** The legacy handshake runs once and
-  the session is shared, so any state the wrapped server keeps is shared too.
-  For a memory or session-scoped server that means one store, not one per
-  request. Each client launches its own `mcp-uplift` process over its own stdio
-  pipe, so this is sharing within a client, not between them.
+- **One warm session serves every request, and the bridge assumes one client.**
+  The legacy handshake runs once and the session is shared, so any state the
+  wrapped server keeps is shared too: a memory or session-scoped server has one
+  store, not one per request. Over stdio that is safe because `mcp-uplift` reads
+  a single pipe and each client launches its own process, so the sharing is
+  within one caller.
+
+  `UpliftBridge` is also exported as a module, and **that path is not
+  multi-tenant**. Nothing in it is partitioned by caller: a parked MRTR call is
+  resumed on possession of its `requestState` alone, with no principal bound to
+  it, and subscriptions are keyed on the client-chosen JSON-RPC request id, so
+  two callers picking the same id collide. A legacy server may also have cached
+  roots, credentials, or capabilities at `initialize` that outlive any one
+  request. If you put this class behind a shared transport, isolating sessions
+  per principal is yours to build, and failing closed when identity is unknown
+  is the only safe default.
 - **The wrapped server is told roots will never change.** `2026-07-28` removed
   `notifications/roots/list_changed`, so a modern client has no way to report a
   change and the bridge advertises `roots.listChanged: false` upstream. That is
